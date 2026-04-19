@@ -1,0 +1,29 @@
+# ─── Python ────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+*.db
+
+# ─── Node ─────────────────────────────────────────
+node_modules/
+dist/
+
+# ─── Data (persisted via Docker volumes) ───────────
+backend/data/
+data/
+
+# ─── Environment ───────────────────────────────────
+.env
+!.env.example
+
+# ─── IDE ──────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── OS ───────────────────────────────────────────
+.DS_Store
+Thumbs.db

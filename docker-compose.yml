@@ -1,0 +1,42 @@
+# ─── Kinoscribe — Docker Compose ───────────────────────────
+#
+# Usage:
+#   OLLAMA_URL=http://192.168.x.x:11434 docker compose up -d
+#   → http://localhost:3000
+# ───────────────────────────────────────────────────────────
+
+services:
+  # ─── Backend (FastAPI) ──────────────────────────────────
+  backend:
+    build: ./backend
+    container_name: kinoscribe-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - backend-data:/app/data
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:///./data/subtitle_translator.db
+      - OLLAMA_BASE_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3}
+      - OLLAMA_REFINE_MODEL=${OLLAMA_MODEL:-llama3}
+      - DEFAULT_SOURCE_LANGUAGE=en
+      - DEFAULT_TARGET_LANGUAGE=${TARGET_LANG:-fr}
+      - CPS_LIMIT=25
+      - SLIDING_WINDOW_SIZE=20
+      - DEBUG=false
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # ─── Frontend (React + Nginx) ───────────────────────────
+  frontend:
+    build: ./frontend
+    container_name: kinoscribe-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  backend-data:

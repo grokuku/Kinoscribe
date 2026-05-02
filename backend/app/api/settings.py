@@ -2,14 +2,13 @@
 Settings API routes: read, update, test connections.
 """
 
-from typing import Dict, List
+from typing import List
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
 from app.core.logging import get_logger
-from app.models.database import Setting
 from app.models.schemas import SettingOut, SettingsUpdate
 from app.services.settings_service import settings_service
 
@@ -47,3 +46,14 @@ async def test_ollama():
     else:
         logger.warning("Ollama connection failed", error=result.get("error"))
     return result
+
+
+@router.get("/ollama-models")
+async def list_ollama_models(
+    base_url: str = Query(..., description="Ollama server URL to query"),
+):
+    """Fetch the list of available models from a specific Ollama server URL."""
+    result = await settings_service.test_ollama_connection(base_url)
+    if result["ok"]:
+        return {"ok": True, "models": result.get("models", [])}
+    return {"ok": False, "models": [], "error": result.get("error", "")}

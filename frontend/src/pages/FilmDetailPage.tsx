@@ -1,207 +1,365 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
-  ArrowLeft, Trash2, Users, Languages, Play, Download, BookOpen,
+  ArrowLeft, Trash2, Users, Languages, Play, Download,
+  Film, Brain, BookOpen, FileText, ChevronRight, Mic, RefreshCw,
+  Subtitles, Upload, Zap, MessageSquare,
 } from 'lucide-react';
 import { useFilm, useTasks } from '../hooks/useApi';
 import { api } from '../api/client';
 import { StatusBadge, TaskProgressBar } from '../components/TaskStatus';
 import SubtitleUploader from '../components/SubtitleUploader';
-import type { Task } from '../types';
+import type { Task, Character, GlossaryEntry, ExistingSubtitle } from '../types';
+
+type Tab = 'profile' | 'translation';
+
+const LANG_NAMES: Record<string, string> = {
+  en: 'Anglais', fr: 'Français', es: 'Espagnol', de: 'Allemand',
+  it: 'Italien', pt: 'Portugais', ja: 'Japonais', ko: 'Coréen', zh: 'Chinois',
+  und: 'Inconnu',
+};
+
+const GENDER_COLORS: Record<string, string> = {
+  male: 'bg-blue-500/15 text-blue-300',
+  female: 'bg-pink-500/15 text-pink-300',
+  neutral: 'bg-amber-500/15 text-amber-300',
+  unknown: 'bg-gray-500/15 text-gray-400',
+};
 
 export default function FilmDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { data: film, loading, error, refresh: refreshFilm } = useFilm(id!);
   const { data: tasks, refresh: refreshTasks } = useTasks();
+  const [tab, setTab] = useState<Tab>('profile');
   const [uploading, setUploading] = useState(false);
   const [starting, setStarting] = useState<string | null>(null);
+  const [glossary, setGlossary] = useState<GlossaryEntry[]>([]);
+  const [lore, setLore] = useState<{ lore_summary: string | null; task_id: string | null; task_status: string | null } | null>(null);
+  const [subtitles, setSubtitles] = useState<ExistingSubtitle[]>([]);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [whisperModel, setWhisperModel] = useState('medium');
 
   const filmTasks = tasks?.filter((t) => t.film_id === id) ?? [];
 
-  // Upload handler
-  const handleUpload = async (file: File, sourceLang: string) => {
+  // Load enrichments when film is loaded
+  useEffect(() => {
+    if (id) {
+      api.getFilmGlossary(id).then(setGlossary).catch(() => {});
+      api.getFilmLore(id).then(setLore).catch(() => {});
+      api.getFilmSubtitles(id).then(setSubtitles).catch(() => {});
+    }
+  }, [id, filmTasks?.length]);
+
+  const handleUpload = async (file: File) => {
     setUploading(true);
     try {
-      await api.uploadSubtitle(film!.id, file, sourceLang);
-      refreshTasks();
-      refreshFilm();
-    } catch (e: any) {
-      alert('Upload erreur : ' + e.message);
-    } finally {
-      setUploading(false);
-    }
+      await api.uploadSubtitle(film!.id, file);
+      refreshTasks(); refreshFilm();
+      api.getFilmSubtitles(id!).then(setSubtitles).catch(() => {});
+    } catch (e: any) { alert('Upload erreur : ' + e.message); }
+    finally { setUploading(false); }
   };
 
-  // Start translation
   const handleStart = async (taskId: string) => {
     setStarting(taskId);
-    try {
-      await api.startTranslation(taskId);
-      refreshTasks();
-    } catch (e: any) {
-      alert('Démarrage erreur : ' + e.message);
-    } finally {
-      setStarting(null);
-    }
+    try { await api.startTranslation(taskId); refreshTasks(); }
+    catch (e: any) { alert('Démarrage erreur : ' + e.message); }
+    finally { setStarting(null); }
   };
 
-  // Delete film
-  const handleDelete = async () => {
-    if (!confirm(`Supprimer "${film!.title}" et toutes ses données ?`)) return;
+  const handleTranslateExisting = async (sub: ExistingSubtitle) => {
+    if (!confirm(`Traduire "${sub.filename}" (${LANG_NAMES[sub.language || 'und'] || sub.language}) ?`)) return;
+    setStarting('existing');
     try {
-      await api.deleteFilm(film!.id);
-      navigate('/');
-    } catch (e: any) {
-      alert('Suppression erreur : ' + e.message);
-    }
+      await api.translateExistingSubtitle(film!.id, sub.path, sub.language || undefined);
+      refreshTasks(); refreshFilm();
+    } catch (e: any) { alert('Erreur : ' + e.message); }
+    finally { setStarting(null); }
   };
 
-  if (loading) return <div className="py-16 text-center text-gray-500">Chargement…</div>;
-  if (error || !film) return <div className="py-16 text-center text-red-400">Film introuvable</div>;
+  const handleAnalyze = async () => {
+    setAnalyzing(true);
+    try {
+      await api.analyzeFilm(film!.id);
+      alert('Analyse contextuelle lancée en arrière-plan');
+      setTimeout(() => { refreshFilm(); api.getFilmGlossary(id!).then(setGlossary); api.getFilmLore(id!).then(setLore); }, 5000);
+    } catch (e: any) { alert('Erreur : ' + e.message); }
+    finally { setAnalyzing(false); }
+  };
+
+  const handleTranscribe = async () => {
+    if (!confirm(`Lancer la transcription Whisper (${whisperModel}) ?\nCela peut prendre du temps sur CPU.`)) return;
+    setTranscribing(true);
+    try {
+      await api.transcribeFilm(film!.id, whisperModel);
+      alert('Transcription Whisper lancée en arrière-plan');
+      setTimeout(() => api.getFilmSubtitles(id!).then(setSubtitles), 10000);
+    } catch (e: any) { alert('Erreur : ' + e.message); }
+    finally { setTranscribing(false); }
+  };
+
+  const handleSync = async (sub: ExistingSubtitle) => {
+    if (!confirm(`Resynchroniser "${sub.filename}" avec Whisper ?`)) return;
+    try {
+      await api.syncSubtitles(film!.id, sub.path, whisperModel);
+      alert('Synchronisation lancée en arrière-plan');
+    } catch (e: any) { alert('Erreur : ' + e.message); }
+  };
+
+  if (loading) return <div className="flex items-center justify-center py-32"><div className="w-8 h-8 border-2 border-brand-500/30 border-t-brand-500 rounded-full animate-spin" /></div>;
+  if (error || !film) return <div className="text-red-400 text-center py-20">Film non trouvé</div>;
 
   const pendingTasks = filmTasks.filter((t) => t.status === 'pending' || t.status === 'failed');
+  const completedTasks = filmTasks.filter((t) => t.status === 'completed');
 
   return (
-    <div>
-      {/* Back + Header */}
-      <Link to="/" className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-300 mb-4">
-        <ArrowLeft className="w-4 h-4" /> Retour aux films
-      </Link>
-
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-100">{film.title}</h1>
-          <div className="flex items-center gap-3 mt-1 text-sm text-gray-500">
+    <div className="animate-fade-in space-y-6">
+      {/* Back + header */}
+      <div className="flex items-center gap-4">
+        <Link to="/" className="btn-ghost !p-2"><ArrowLeft className="w-5 h-5" /></Link>
+        <div className="flex-1 min-w-0">
+          <h1 className="text-2xl font-bold text-gray-100 truncate">{film.title}</h1>
+          <div className="flex items-center gap-2 text-sm text-gray-500 mt-0.5">
             {film.year && <span>{film.year}</span>}
-            {film.director && <span>· Réalisé par {film.director}</span>}
-            <span className="flex items-center gap-1">
-              <Languages className="w-3.5 h-3.5" />
-              {film.source_language.toUpperCase()} → {film.target_language.toUpperCase()}
-            </span>
+            {film.director && <span>· de {film.director}</span>}
+            <span className="flex items-center gap-1"><Languages className="w-3 h-3" />{film.source_language.toUpperCase()} → {film.target_language.toUpperCase()}</span>
           </div>
-          {film.summary && <p className="text-gray-500 mt-2 text-sm">{film.summary}</p>}
         </div>
-        <button
-          onClick={handleDelete}
-          className="text-gray-600 hover:text-red-400 transition-colors p-2"
-          title="Supprimer"
-        >
-          <Trash2 className="w-5 h-5" />
-        </button>
+        <button onClick={async () => { if (!confirm('Supprimer ce film ?')) return; await api.deleteFilm(film.id); navigate('/'); }} className="btn-ghost text-gray-600 hover:text-red-400"><Trash2 className="w-4 h-4" /></button>
       </div>
 
-      {/* Characters */}
-      {film.characters.length > 0 && (
-        <div className="mb-6">
-          <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-300 mb-3">
-            <Users className="w-4 h-4" /> Personnages identifiés
-          </h2>
-          <div className="flex flex-wrap gap-2">
-            {film.characters.map((c) => (
-              <span
-                key={c.name}
-                className={`px-3 py-1 rounded-full text-xs font-medium ${
-                  c.gender === 'male'
-                    ? 'bg-blue-900/40 text-blue-300'
-                    : c.gender === 'female'
-                      ? 'bg-pink-900/40 text-pink-300'
-                      : 'bg-gray-800 text-gray-400'
-                }`}
-                title={c.description || c.gender}
-              >
-                {c.name} ({c.gender})
-              </span>
-            ))}
-          </div>
-        </div>
+      {/* Tabs */}
+      <div className="flex gap-1 border-b border-white/[0.06]">
+        {(['profile', 'translation'] as Tab[]).map((t) => (
+          <button key={t} onClick={() => setTab(t)}
+            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-all ${tab === t ? 'text-brand-300 border-brand-500' : 'text-gray-500 border-transparent hover:text-gray-300'}`}>
+            {t === 'profile' ? '📊 Fiche film' : '🔄 Traduction'}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'profile' && (
+        <ProfileTab film={film} glossary={glossary} lore={lore} characters={film.characters} onAnalyze={handleAnalyze} analyzing={analyzing} />
       )}
+      {tab === 'translation' && (
+        <TranslationTab
+          filmId={film.id} film={film} filmTasks={filmTasks}
+          subtitles={subtitles} pendingTasks={pendingTasks} completedTasks={completedTasks}
+          onStart={handleStart} starting={starting} onUpload={handleUpload} uploading={uploading}
+          onTranslateExisting={handleTranslateExisting}
+          onTranscribe={handleTranscribe} transcribing={transcribing}
+          onSync={handleSync} whisperModel={whisperModel} setWhisperModel={setWhisperModel}
+          onAnalyze={handleAnalyze} analyzing={analyzing}
+        />
+      )}
+    </div>
+  );
+}
 
-      {/* Upload zone */}
-      <div className="mb-6">
-        <h2 className="text-sm font-semibold text-gray-300 mb-3">Ajouter des sous-titres</h2>
-        <SubtitleUploader onUpload={handleUpload} disabled={uploading} />
-        {uploading && <p className="text-sm text-brand-400 mt-2">Upload en cours…</p>}
+// ─── Profile Tab ────────────────────────────────────────────────────────────
+
+function ProfileTab({ film, glossary, lore, characters, onAnalyze, analyzing }: {
+  film: any; glossary: GlossaryEntry[]; lore: any; characters: Character[];
+  onAnalyze: () => void; analyzing: boolean;
+}) {
+  return (
+    <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 animate-fade-in">
+      <div className="xl:col-span-2 space-y-6">
+        {/* Lore summary */}
+        <div>
+          <h2 className="section-title flex items-center gap-2">Résumé narratif <button onClick={onAnalyze} disabled={analyzing} className="btn-ghost !p-1 text-brand-400 hover:text-brand-300" title="Lancer l'analyse contextuelle">{analyzing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Brain className="w-4 h-4" />}</button></h2>
+          <div className="glass-card p-5">
+            {lore?.lore_summary ? <p className="text-sm text-gray-300 leading-relaxed whitespace-pre-wrap">{lore.lore_summary}</p> : <p className="text-sm text-gray-600 italic">Aucun résumé — cliquez 🧠 pour lancer l'analyse contextuelle</p>}
+          </div>
+        </div>
+
+        {/* Characters */}
+        <div>
+          <h2 className="section-title flex items-center gap-2"><Users className="w-4 h-4" /> Personnages</h2>
+          {characters.length > 0 ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {characters.map((c) => (
+                <div key={c.name} className="glass-card p-3 flex items-start gap-3">
+                  <span className={`badge flex-shrink-0 ${GENDER_COLORS[c.gender] || GENDER_COLORS.unknown}`}>
+                    {c.gender === 'male' ? '♂' : c.gender === 'female' ? '♀' : '?'}
+                  </span>
+                  <div className="min-w-0"><p className="text-sm font-medium text-gray-200 truncate">{c.name}</p>{c.description && <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{c.description}</p>}</div>
+                </div>
+              ))}
+            </div>
+          ) : <p className="text-sm text-gray-600 italic">Aucun personnage identifié</p>}
+        </div>
+
+        {/* Glossary */}
+        <div>
+          <h2 className="section-title flex items-center gap-2"><BookOpen className="w-4 h-4" /> Glossaire</h2>
+          {glossary.length > 0 ? (
+            <div className="glass-card overflow-hidden">
+              <table className="w-full text-sm"><thead><tr className="border-b border-white/[0.06]"><th className="px-4 py-2 text-left text-gray-500 font-medium">Source</th><th className="px-4 py-2 text-left text-gray-500 font-medium">Cible</th><th className="px-4 py-2 text-left text-gray-500 font-medium">Notes</th></tr></thead>
+              <tbody>{glossary.map((g, i) => <tr key={i} className="border-b border-white/[0.03]"><td className="px-4 py-2 text-gray-300 font-mono">{g.source_term}</td><td className="px-4 py-2 text-brand-300 font-mono">{g.target_term}</td><td className="px-4 py-2 text-gray-500">{g.notes || '—'}</td></tr>)}</tbody>
+              </table>
+            </div>
+          ) : <p className="text-sm text-gray-600 italic">Aucun glossaire</p>}
+        </div>
       </div>
 
-      {/* Tasks */}
-      <div className="mb-6">
-        <h2 className="text-sm font-semibold text-gray-300 mb-3">Tâches de traduction</h2>
-        {filmTasks.length === 0 ? (
-          <p className="text-sm text-gray-600">Aucune tâche — uploadez un fichier sous-titre pour commencer.</p>
-        ) : (
-          <div className="space-y-3">
-            {filmTasks.map((task) => (
-              <TaskRow
-                key={task.id}
-                task={task}
-                onStart={handleStart}
-                starting={starting === task.id}
-              />
-            ))}
-          </div>
-        )}
+      {/* Sidebar metadata */}
+      <div className="space-y-4">
+        <h2 className="section-title">Métadonnées</h2>
+        <MetaCard label="Langue source" value={LANG_NAMES[film.source_language] || film.source_language.toUpperCase()} />
+        <MetaCard label="Langue cible" value={LANG_NAMES[film.target_language] || film.target_language.toUpperCase()} />
+        {film.director && <MetaCard label="Réalisateur" value={film.director} />}
+        {film.year && <MetaCard label="Année" value={String(film.year)} />}
+        {film.path && <MetaCard label="Dossier" value={film.path} mono />}
+        {film.poster_path && <MetaCard label="Poster" value="✅ Disponible" />}
+        <MetaCard label="Sous-titres existants" value={film.has_existing_subs ? '✅ Oui' : '❌ Non'} />
       </div>
     </div>
   );
 }
 
-// ─── Task row component ────────────────────────────────────────
+// ─── Translation Tab ─────────────────────────────────────────────────────────
 
-function TaskRow({
-  task,
-  onStart,
-  starting,
+function TranslationTab({
+  filmId, film, filmTasks, subtitles, pendingTasks, completedTasks,
+  onStart, starting, onUpload, uploading, onTranslateExisting,
+  onTranscribe, transcribing, onSync, whisperModel, setWhisperModel,
+  onAnalyze, analyzing,
 }: {
-  task: Task;
-  onStart: (id: string) => void;
-  starting: boolean;
+  filmId: string; film: any; filmTasks: Task[]; subtitles: ExistingSubtitle[];
+  pendingTasks: Task[]; completedTasks: Task[];
+  onStart: (id: string) => void; starting: string | null;
+  onUpload: (file: File) => void; uploading: boolean;
+  onTranslateExisting: (sub: ExistingSubtitle) => void;
+  onTranscribe: () => void; transcribing: boolean;
+  onSync: (sub: ExistingSubtitle) => void;
+  whisperModel: string; setWhisperModel: (m: string) => void;
+  onAnalyze: () => void; analyzing: boolean;
 }) {
-  const canStart = task.status === 'pending' || task.status === 'failed';
-  const isRunning = ['analyzing_context', 'translating', 'refining'].includes(task.status);
+  const hasSubtitles = subtitles.length > 0;
+  const hasVideo = !!film.video_path;
 
   return (
-    <div className="border border-gray-800 rounded-xl p-4 space-y-3">
-      {/* Top row */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <StatusBadge status={task.status} />
-          <span className="text-sm text-gray-300 font-mono">{task.source_filename}</span>
+    <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 animate-fade-in">
+      <div className="xl:col-span-2 space-y-6">
+        {/* Existing subtitles */}
+        {hasSubtitles && (
+          <div>
+            <h2 className="section-title flex items-center gap-2"><Subtitles className="w-4 h-4" /> Sous-titres disponibles</h2>
+            <div className="space-y-2">
+              {subtitles.map((sub) => (
+                <div key={sub.path} className="glass-card p-3 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <FileText className="w-4 h-4 text-brand-400 flex-shrink-0" />
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-gray-200 truncate font-mono">{sub.filename}</p>
+                      <div className="flex items-center gap-2 mt-0.5">
+                        <span className="text-xs text-gray-500">{LANG_NAMES[sub.language || 'und'] || sub.language?.toUpperCase()}</span>
+                        {sub.is_sdh && <span className="text-[10px] badge bg-yellow-500/15 text-yellow-300">SDH</span>}
+                        {sub.is_forced && <span className="text-[10px] badge bg-orange-500/15 text-orange-300">Forced</span>}
+                        {sub.is_gendered && <span className="text-[10px] badge bg-violet-500/15 text-violet-300">Genre</span>}
+                        <span className="text-[10px] text-gray-600">{sub.format}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <button onClick={() => onSync(sub)} className="btn-ghost !p-1.5 text-gray-600 hover:text-violet-400" title="Resync avec Whisper">
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    </button>
+                    <button onClick={() => onTranslateExisting(sub)} disabled={starting === 'existing'} className="btn-primary !py-1.5 !px-3 !text-xs">
+                      <Play className="w-3 h-3" /> Traduire
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Upload (always available for side-loading) */}
+        <div>
+          <h2 className="section-title flex items-center gap-2"><Upload className="w-4 h-4" /> Ajouter un sous-titre</h2>
+          <p className="text-xs text-gray-600 mb-3">Optionnel — uploadez un fichier si aucun sous-titre n'est disponible ou pour en ajouter un dans une autre langue</p>
+          <SubtitleUploader onUpload={onUpload} disabled={uploading} />
         </div>
-        <div className="flex items-center gap-2">
-          {canStart && (
-            <button
-              onClick={() => onStart(task.id)}
-              disabled={starting}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-brand-600 hover:bg-brand-500 disabled:opacity-50 text-white text-xs font-medium rounded-md transition-colors"
-            >
-              <Play className="w-3.5 h-3.5" />
-              {starting ? 'Démarrage…' : 'Traduire'}
-            </button>
-          )}
-          {task.status === 'completed' && task.target_filename && (
-            <a
-              href={`/api/tasks/${task.id}/download`}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium rounded-md transition-colors"
-            >
-              <Download className="w-3.5 h-3.5" />
-              Télécharger
-            </a>
+
+        {/* Tasks */}
+        <div>
+          <h2 className="section-title">Tâches de traduction</h2>
+          {filmTasks.length === 0 ? (
+            <p className="text-sm text-gray-600 glass-card p-6 text-center">Aucune tâche — sélectionnez un sous-titre ci-dessus ou uploadez-en un.</p>
+          ) : (
+            <div className="space-y-3">
+              {filmTasks.map((task) => (
+                <div key={task.id} className="glass-card p-4 flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-mono text-gray-300 truncate">{task.source_filename}</p>
+                    <div className="flex items-center gap-2 mt-1"><StatusBadge status={task.status} /><TaskProgressBar status={task.status} progress={task.progress_pct} /></div>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    {task.status === 'pending' && <button onClick={() => onStart(task.id)} disabled={!!starting} className="btn-primary !py-1.5 !px-3 !text-xs">{starting === task.id ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />} Lancer</button>}
+                    {task.status === 'completed' && <a href={`/api/tasks/${task.id}/download`} className="btn-primary !py-1.5 !px-3 !text-xs"><Download className="w-3 h-3" /> Télécharger</a>}
+                  </div>
+                </div>
+              ))}
+            </div>
           )}
         </div>
       </div>
 
-      {/* Progress bar */}
-      {(isRunning || task.status === 'completed') && (
-        <TaskProgressBar status={task.status} progress={task.progress_pct} />
-      )}
+      {/* Sidebar: tools */}
+      <div className="space-y-4">
+        <h2 className="section-title">Outils</h2>
 
-      {/* Error */}
-      {task.error_message && (
-        <p className="text-xs text-red-400 bg-red-900/20 rounded-md px-3 py-2">
-          {task.error_message}
-        </p>
-      )}
+        {/* Manual analysis */}
+        <div className="glass-card p-4 space-y-3">
+          <h3 className="text-sm font-semibold text-gray-200 flex items-center gap-2"><Brain className="w-4 h-4 text-brand-400" /> Analyse contextuelle</h3>
+          <p className="text-xs text-gray-500">Analyse les personnages, résume l'intrigue, crée le glossaire — sans lancer de traduction.</p>
+          <button onClick={onAnalyze} disabled={analyzing} className="btn-secondary w-full !text-xs">{analyzing ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />} Lancer l'analyse</button>
+        </div>
+
+        {/* Whisper transcription */}
+        <div className="glass-card p-4 space-y-3">
+          <h3 className="text-sm font-semibold text-gray-200 flex items-center gap-2"><Mic className="w-4 h-4 text-violet-400" /> Whisper</h3>
+          {!hasVideo ? (
+            <p className="text-xs text-gray-600">Pas de fichier vidéo détecté. Scannez la bibliothèque d'abord.</p>
+          ) : (
+            <>
+              <p className="text-xs text-gray-500">Reconnaissance vocale — génère des sous-titres depuis l'audio ou resynchronise les timings existants.</p>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 uppercase mb-1">Modèle</label>
+                <select value={whisperModel} onChange={(e) => setWhisperModel(e.target.value)} className="select-field !py-1.5 !text-xs !w-full">
+                  {['tiny', 'base', 'small', 'medium', 'large'].map((m) => <option key={m} value={m}>{m}{m === 'medium' ? ' (recommandé)' : ''}</option>)}
+                </select>
+              </div>
+              <button onClick={onTranscribe} disabled={transcribing} className="btn-secondary w-full !text-xs">
+                {transcribing ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Mic className="w-3 h-3" />} Transcrire l'audio
+              </button>
+            </>
+          )}
+        </div>
+
+        {/* Quick stats */}
+        <div className="glass-card p-4 space-y-2">
+          <h3 className="text-xs font-semibold text-gray-500 uppercase">Stats</h3>
+          <div className="flex justify-between text-xs"><span className="text-gray-500">Sous-titres dispo</span><span className="text-gray-300 font-mono">{subtitles.length}</span></div>
+          <div className="flex justify-between text-xs"><span className="text-gray-500">Tâches</span><span className="text-gray-300 font-mono">{filmTasks.length}</span></div>
+          <div className="flex justify-between text-xs"><span className="text-gray-500">Terminées</span><span className="text-gray-300 font-mono">{completedTasks.length}</span></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Shared components ──────────────────────────────────────────────────────
+
+function MetaCard({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="glass-card p-3">
+      <p className="text-[10px] font-semibold text-gray-600 uppercase tracking-wider mb-0.5">{label}</p>
+      <p className={`text-sm text-gray-200 ${mono ? 'font-mono break-all' : ''}`}>{value}</p>
     </div>
   );
 }

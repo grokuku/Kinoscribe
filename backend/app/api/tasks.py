@@ -38,12 +38,14 @@ def _build_services_from_settings(base_url: str, model: str, cps_limit: int):
 async def upload_subtitle_and_start(
     film_id: str,
     file: UploadFile = File(...),
-    source_language: str = "en",
     session: AsyncSession = Depends(get_session),
 ):
     """
     Upload a subtitle file for a film and automatically create a translation task.
+    Source language is auto-detected from the filename (e.g. film.en.srt → en).
     """
+    from app.services.scanner_service import parse_subtitle_filename
+
     film = await session.get(Film, film_id)
     if not film:
         raise HTTPException(404, "Film not found")
@@ -57,17 +59,28 @@ async def upload_subtitle_and_start(
     with open(file_path, "wb") as f:
         f.write(content)
 
-    logger.info("Subtitle uploaded", film_id=film_id, filename=file.filename, size=len(content))
+    # Auto-detect source language from filename
+    filename = file.filename or "subtitle.srt"
+    sub_info = parse_subtitle_filename(filename)
+    source_language = sub_info.get("language") or "en"
+    is_sdh = sub_info.get("is_sdh", False)
+
+    logger.info("Subtitle uploaded", film_id=film_id, filename=filename,
+                source_language=source_language, sdh=is_sdh, size=len(content))
 
     # Determine format from extension
-    fmt = os.path.splitext(file.filename or ".srt")[1].lstrip(".").lower()
+    fmt = os.path.splitext(filename)[1].lstrip(".").lower()
     if fmt not in ("srt", "vtt", "ass", "ssa"):
         fmt = "srt"
+
+    # Override film source language if we detected a specific one
+    if film.source_language == "en" and source_language != "en":
+        film.source_language = source_language
 
     # Create translation task
     task = TranslationTask(
         film_id=film_id,
-        source_filename=file.filename or "subtitle.srt",
+        source_filename=filename,
         source_format=fmt,
         source_path=file_path,
         source_language=source_language,
@@ -76,6 +89,58 @@ async def upload_subtitle_and_start(
     await session.commit()
     await session.refresh(task)
 
+    return task
+
+
+@router.post("/{film_id}/translate-existing", response_model=TaskOut, status_code=201)
+async def translate_existing_subtitle(
+    film_id: str,
+    data: dict,
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    Start a translation from an existing subtitle file (found by scan or upload).
+    Body: { "subtitle_path": "/path/to/film.en.srt", "source_language": "en" (optional) }
+    """
+    from app.services.scanner_service import parse_subtitle_filename
+
+    film = await session.get(Film, film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+
+    subtitle_path = data.get("subtitle_path", "")
+    if not subtitle_path or not os.path.isfile(subtitle_path):
+        raise HTTPException(400, f"Subtitle file not found: {subtitle_path}")
+
+    # Auto-detect source language
+    filename = os.path.basename(subtitle_path)
+    sub_info = parse_subtitle_filename(filename)
+    source_language = data.get("source_language") or sub_info.get("language") or "en"
+
+    # Copy to uploads dir for consistency
+    upload_dir = os.path.join("data", "uploads", film_id)
+    os.makedirs(upload_dir, exist_ok=True)
+    dest_path = os.path.join(upload_dir, filename)
+    if dest_path != subtitle_path:
+        import shutil
+        shutil.copy2(subtitle_path, dest_path)
+
+    fmt = os.path.splitext(filename)[1].lstrip(".").lower()
+    if fmt not in ("srt", "vtt", "ass", "ssa"):
+        fmt = "srt"
+
+    task = TranslationTask(
+        film_id=film_id,
+        source_filename=filename,
+        source_format=fmt,
+        source_path=dest_path,
+        source_language=source_language,
+    )
+    session.add(task)
+    await session.commit()
+    await session.refresh(task)
+
+    logger.info("Translation task from existing subtitle", film_id=film_id, path=subtitle_path, lang=source_language)
     return task
 
 
@@ -188,11 +253,17 @@ async def _run_translation_workflow(task_id: str):
         # Read runtime config from DB
         ollama_url = await settings_service.get(session, "ollama_base_url")
         ollama_model = await settings_service.get(session, "ollama_model")
+        ollama_refine_model = await settings_service.get(session, "ollama_refine_model")
         cps_limit = await settings_service.get_int(session, "cps_limit")
         window_size = await settings_service.get_int(session, "sliding_window_size")
         batch_size = await settings_service.get_int(session, "batch_size")
         temperature = await settings_service.get_float(session, "llm_temperature")
         auto_clean_sdh = await settings_service.get_bool(session, "auto_clean_sdh")
+        draft_think = await settings_service.get_bool(session, "draft_think")
+        refine_think = await settings_service.get_bool(session, "refine_think")
+
+        # Use refine model if configured, otherwise same as draft model
+        refine_model = ollama_refine_model.strip() if ollama_refine_model and ollama_refine_model.strip() else None
 
         # Build services with runtime settings
         llm, ctx, tx, sub_svc = _build_services_from_settings(ollama_url, ollama_model, cps_limit)
@@ -213,6 +284,11 @@ async def _run_translation_workflow(task_id: str):
             # ── Phase 1: Parse subtitles ────────────────────────────
             parsed = sub_svc.parse_file(task.source_path)
             logger.info("Subtitles parsed", task_id=task_id, lines=len(parsed.lines))
+
+            # Clean SDH tags if enabled (before context analysis & translation)
+            if auto_clean_sdh:
+                parsed = sub_svc.clean_sdh_from_parsed(parsed)
+                logger.info("SDH tags cleaned for translation", task_id=task_id)
 
             # ── Phase 2: Context analysis ───────────────────────────
             task.status = TaskStatusEnum.analyzing_context
@@ -253,9 +329,32 @@ async def _run_translation_workflow(task_id: str):
                 window_size=window_size,
                 batch_size=batch_size,
                 temperature=temperature,
+                think=draft_think,
+                db_session=session,
             )
 
-            # ── Phase 4: Write output ───────────────────────────────
+            # ── Phase 4: Refine pass (optional) ─────────────────────
+            if refine_model:
+                task.status = TaskStatusEnum.refining
+                await session.commit()
+                logger.info(
+                    "Starting refine pass",
+                    task_id=task_id,
+                    model=refine_model,
+                    think=refine_think,
+                )
+                refine_llm = OllamaProvider(base_url=ollama_url, model=refine_model)
+                refine_ctx = ContextService(refine_llm)
+                refine_tx = TranslationService(refine_llm, refine_ctx, sub_svc)
+                translated_lines = await refine_tx.refine_translation(
+                    task, film, translated_lines, parsed,
+                    batch_size=batch_size,
+                    temperature=temperature,
+                    think=refine_think,
+                    db_session=session,
+                )
+
+            # ── Phase 5: Write output ───────────────────────────────
             output_dir = os.path.join("data", "output", film.id)
             os.makedirs(output_dir, exist_ok=True)
             base_name = os.path.splitext(task.source_filename)[0]

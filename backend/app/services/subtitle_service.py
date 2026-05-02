@@ -224,3 +224,20 @@ class SubtitleService:
         if result:
             logger.info("SDH speakers found", speakers=result)
         return result
+
+    def clean_sdh_from_parsed(self, parsed: ParsedSubtitle) -> ParsedSubtitle:
+        """Remove SDH tags from all lines in a parsed subtitle (for cleaner translation)."""
+        cleaned_lines = []
+        for line in parsed.lines:
+            cleaned_text = clean_sdh_tags(line.raw_text)
+            if cleaned_text:
+                cleaned_lines.append(SubtitleLine(
+                    index=line.index,
+                    start_ms=line.start_ms,
+                    end_ms=line.end_ms,
+                    text=cleaned_text,
+                    raw_text=cleaned_text,
+                    style=line.style,
+                ))
+        logger.info("SDH tags cleaned", original=len(parsed.lines), cleaned=len(cleaned_lines))
+        return ParsedSubtitle(lines=cleaned_lines, format=parsed.format, source_path=parsed.source_path)

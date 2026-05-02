@@ -11,7 +11,24 @@ export interface Film {
   source_language: string;
   target_language: string;
   characters: Character[];
+  // Library / filesystem integration
+  library_id: string | null;
+  path: string | null;
+  video_path: string | null;
+  poster_path: string | null;
+  has_existing_subs: boolean;
   created_at: string | null;
+}
+
+export interface ExistingSubtitle {
+  filename: string;
+  path: string;
+  language: string | null;
+  is_sdh: boolean;
+  is_forced: boolean;
+  is_gendered: boolean;
+  format: string;
+  source: 'scanner' | 'uploaded';
 }
 
 export interface Character {

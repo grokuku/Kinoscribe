@@ -61,6 +61,12 @@ class FilmOut(BaseModel):
     source_language: str
     target_language: str
     characters: List[CharacterOut] = Field(default_factory=list)
+    # Library / file system integration
+    library_id: Optional[str] = None
+    path: Optional[str] = None
+    video_path: Optional[str] = None
+    poster_path: Optional[str] = None
+    has_existing_subs: bool = False
     created_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
@@ -115,7 +121,98 @@ class SettingsUpdate(BaseModel):
     updates: Dict[str, str] = Field(default_factory=dict)
 
 
+# ─── Libraries & Sources ──────────────────────────────────────────────────────
+
+class LibrarySourceCreate(BaseModel):
+    source_type: str = "local"  # 'local' | 'ssh'
+    path: str  # For local: absolute path. For SSH: display name / identifier
+    ssh_host: Optional[str] = None
+    ssh_port: int = 22
+    ssh_username: Optional[str] = None
+    ssh_auth_type: Optional[str] = None  # 'key' | 'password'
+    ssh_private_key_path: Optional[str] = None
+    ssh_password: Optional[str] = None
+    ssh_remote_path: Optional[str] = None
+    enabled: bool = True
+    scan_depth: int = 2
+
+
+class LibrarySourceOut(BaseModel):
+    id: str
+    library_id: str
+    source_type: str = "local"
+    path: str
+    # SSH fields
+    ssh_host: Optional[str] = None
+    ssh_port: Optional[int] = 22
+    ssh_username: Optional[str] = None
+    ssh_auth_type: Optional[str] = None
+    ssh_private_key_path: Optional[str] = None
+    ssh_password: Optional[str] = None  # masked in output
+    ssh_remote_path: Optional[str] = None
+    # Common
+    enabled: bool = True
+    scan_depth: int = 2
+    last_scan_at: Optional[datetime] = None
+    scan_status: str = "idle"
+    scan_error: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class LibraryCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+
+
+class LibraryOut(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    sources: List[LibrarySourceOut] = Field(default_factory=list)
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class LibraryUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+
+class ScanResultOut(BaseModel):
+    """Result of a library scan."""
+    library_id: str
+    films_found: int = 0
+    films_created: int = 0
+    films_updated: int = 0
+    errors: List[str] = Field(default_factory=list)
+
+
 # ─── Generic ────────────────────────────────────────────────────────────────
 
 class MessageResponse(BaseModel):
     message: str
+
+
+# ─── Existing Subtitles ──────────────────────────────────────────────────────
+
+class ExistingSubtitleOut(BaseModel):
+    """A subtitle file found in the film's directory or uploaded."""
+    filename: str
+    path: str
+    language: Optional[str] = None
+    is_sdh: bool = False
+    is_forced: bool = False
+    is_gendered: bool = False
+    format: str = "srt"
+    source: str = "scanner"  # 'scanner' | 'uploaded'
+
+
+class StartFromSubtitle(BaseModel):
+    """Start a translation from an existing subtitle file."""
+    subtitle_path: str
+    source_language: Optional[str] = None  # auto-detected if None

@@ -20,8 +20,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
-// ─── Films ───────────────────────────────────────────────────
-
 import type { Film, FilmCreate } from '../types';
 
 export const api = {
@@ -34,14 +32,32 @@ export const api = {
     request<void>(`/films/${id}`, { method: 'DELETE' }),
   getCharacters: (filmId: string) =>
     request<Character[]>(`/films/${filmId}/characters`),
+  getFilmGlossary: (filmId: string) =>
+    request<GlossaryEntry[]>(`/films/${filmId}/glossary`),
+  getFilmLore: (filmId: string) =>
+    request<{ lore_summary: string | null; task_id: string | null; task_status: string | null }>(`/films/${filmId}/lore`),
+  getFilmPosterUrl: (filmId: string) => `/api/films/${filmId}/poster`,
+  getFilmSubtitles: (filmId: string) =>
+    request<ExistingSubtitle[]>(`/films/${filmId}/subtitles`),
+  translateExistingSubtitle: (filmId: string, subtitlePath: string, sourceLanguage?: string) =>
+    request<Task>(`/tasks/${filmId}/translate-existing`, {
+      method: 'POST',
+      body: JSON.stringify({ subtitle_path: subtitlePath, source_language: sourceLanguage }),
+    }),
+  analyzeFilm: (filmId: string) =>
+    request<{ status: string; film_id: string }>(`/films/${filmId}/analyze`, { method: 'POST' }),
+  transcribeFilm: (filmId: string, modelSize?: string, language?: string) =>
+    request<{ status: string; film_id: string; model: string }>(`/films/${filmId}/transcribe?model_size=${modelSize || 'medium'}${language ? `&language=${language}` : ''}`, { method: 'POST' }),
+  syncSubtitles: (filmId: string, subtitlePath: string, modelSize?: string) =>
+    request<{ status: string; film_id: string }>(`/films/${filmId}/sync-subtitles?subtitle_path=${encodeURIComponent(subtitlePath)}&model_size=${modelSize || 'medium'}`, { method: 'POST' }),
 
   // Tasks
-  uploadSubtitle: (filmId: string, file: File, sourceLanguage = 'en') => {
+  uploadSubtitle: (filmId: string, file: File) => {
     const form = new FormData();
     form.append('file', file);
-    return request<Task>(`/tasks/${filmId}/upload?source_language=${sourceLanguage}`, {
+    return request<Task>(`/tasks/${filmId}/upload`, {
       method: 'POST',
-      headers: {}, // let browser set Content-Type for multipart
+      headers: {},
       body: form,
     });
   },
@@ -52,6 +68,7 @@ export const api = {
   getTaskProgress: (id: string) => request<TaskProgress>(`/tasks/${id}/progress`),
   getGlossary: (taskId: string) =>
     request<GlossaryEntry[]>(`/tasks/${taskId}/glossary`),
+
   // Settings
   getSettings: () => request<Setting[]>('/settings/'),
   updateSettings: (updates: Record<string, string>) =>
@@ -60,7 +77,10 @@ export const api = {
       body: JSON.stringify({ updates }),
     }),
   testOllama: () => request<{ ok: boolean; models?: string[]; error?: string }>('/settings/test-ollama', { method: 'POST' }),
+  fetchOllamaModels: (baseUrl: string) =>
+    request<{ ok: boolean; models: string[]; error?: string }>(
+      `/settings/ollama-models?base_url=${encodeURIComponent(baseUrl)}`
+    ),
 };
 
-// Re-export types used in signatures
-import type { Character, Task, TaskProgress, GlossaryEntry, Setting } from '../types';
+import type { Character, Task, TaskProgress, GlossaryEntry, Setting, ExistingSubtitle } from '../types';

@@ -122,7 +122,7 @@ class ContextService:
         ]
 
         try:
-            raw = await self.llm.chat(messages, format_json=True, temperature=0.2)
+            raw = await self.llm.chat(messages, format_json=True, temperature=0.2, think=False)
             return self._parse_json_response(raw).get("characters", [])
         except Exception as e:
             logger.error("LLM character analysis failed", error=str(e))
@@ -166,7 +166,7 @@ class ContextService:
         ]
 
         try:
-            summary = await self.llm.chat(messages, temperature=0.4)
+            summary = await self.llm.chat(messages, temperature=0.4, think=True)
             logger.info("Lore summary generated", length=len(summary))
             return summary
         except Exception as e:
@@ -207,7 +207,7 @@ class ContextService:
         ]
 
         try:
-            raw = await self.llm.chat(messages, format_json=True, temperature=0.2)
+            raw = await self.llm.chat(messages, format_json=True, temperature=0.2, think=False)
             return self._parse_json_response(raw).get("glossary", [])
         except Exception as e:
             logger.error("Glossary build failed", error=str(e))

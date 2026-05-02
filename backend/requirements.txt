@@ -17,5 +17,16 @@ structlog
 # Subtitle parsing
 pysubs2
 
+# SSH/SFTP
+asyncssh
+
+# Whisper transcription (optional — install for audio transcription)
+# faster-whisper  # Uncomment to enable Whisper transcription
+
 # Utilities
 python-dotenv
+
+# Testing
+pytest>=8.0
+pytest-asyncio
+httpx>=0.27

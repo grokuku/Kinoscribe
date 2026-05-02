@@ -4,6 +4,7 @@ import FilmsPage from './pages/FilmsPage';
 import FilmDetailPage from './pages/FilmDetailPage';
 import TasksPage from './pages/TasksPage';
 import SettingsPage from './pages/SettingsPage';
+import LibrariesPage from './pages/LibrariesPage';
 
 export default function App() {
   return (
@@ -14,6 +15,7 @@ export default function App() {
           <Route path="/films/:id" element={<FilmDetailPage />} />
           <Route path="/tasks" element={<TasksPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/libraries" element={<LibrariesPage />} />
         </Routes>
       </Layout>
     </BrowserRouter>

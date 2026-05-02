@@ -66,6 +66,13 @@ class Film(Base):
     # Raw NFO / external metadata stored as JSON blob
     raw_metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    # Library / file system integration
+    library_id: Mapped[Optional[str]] = mapped_column(ForeignKey("libraries.id", ondelete="SET NULL"), nullable=True)
+    path: Mapped[Optional[str]] = mapped_column(String, nullable=True)            # chemin absolu du dossier du film
+    video_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)      # chemin du fichier vidéo
+    poster_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)     # chemin du poster
+    has_existing_subs: Mapped[bool] = mapped_column(default=False)                # a des sous-titres existants
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
@@ -160,3 +167,54 @@ class Setting(Base):
     options: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     # Grouping in the UI
     category: Mapped[str] = mapped_column(String, default="general")
+
+
+class Library(Base):
+    """A library is a named collection of film directories (like Jellyfin libraries)."""
+    __tablename__ = "libraries"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+    # Relationships
+    sources: Mapped[List["LibrarySource"]] = relationship(
+        back_populates="library", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+
+class LibrarySource(Base):
+    """A folder that belongs to a library. Can be local or remote (SSH, etc.)."""
+    __tablename__ = "library_sources"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    library_id: Mapped[str] = mapped_column(ForeignKey("libraries.id"))
+
+    # Source type: 'local', 'ssh' (extensible: 'smb', 'nfs' in future)
+    source_type: Mapped[str] = mapped_column(String, default="local")
+
+    # ── Local source ──
+    path: Mapped[str] = mapped_column(String, nullable=False)
+
+    # ── SSH source ──
+    ssh_host: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    ssh_port: Mapped[int] = mapped_column(Integer, default=22, nullable=True)
+    ssh_username: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    ssh_auth_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # 'key' | 'password'
+    ssh_private_key_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    ssh_password: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # stored encrypted in future
+    ssh_remote_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    # ── Common ──
+    enabled: Mapped[bool] = mapped_column(default=True)
+    scan_depth: Mapped[int] = mapped_column(Integer, default=2)  # 1=flat, 2=one level of subdirs (Jellyfin)
+    last_scan_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    scan_status: Mapped[str] = mapped_column(String, default="idle")  # 'idle' | 'scanning' | 'error'
+    scan_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+    # Relationship
+    library: Mapped["Library"] = relationship(back_populates="sources")

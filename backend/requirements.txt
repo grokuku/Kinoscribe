@@ -4,7 +4,6 @@ pydantic>=2
 pydantic-settings
 python-multipart
 aiohttp
-requests
 xmltodict
 
 # Database
@@ -25,6 +24,9 @@ asyncssh
 
 # Utilities
 python-dotenv
+
+# Encryption
+ cryptography>=42.0
 
 # Testing
 pytest>=8.0

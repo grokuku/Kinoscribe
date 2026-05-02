@@ -12,6 +12,11 @@ class Settings(BaseSettings):
     app_name: str = "Kinoscribe"
     debug: bool = False
 
+    # ─── Security ─────────────────────────────────────
+    secret_key: str = "change-me-in-production-use-a-long-random-string"
+    # SSH host key verification: 'none' (accept all), 'auto' (use ~/.ssh/known_hosts), or path to known_hosts file
+    ssh_known_hosts: str = "none"
+
     # ─── Database ──────────────────────────────────────
     database_url: str = "sqlite+aiosqlite:///./data/subtitle_translator.db"
 

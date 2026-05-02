@@ -3,13 +3,13 @@ import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Trash2, Users, Languages, Play, Download,
   Film, Brain, BookOpen, FileText, ChevronRight, Mic, RefreshCw,
-  Subtitles, Upload, Zap, MessageSquare,
+  Subtitles, Upload, Zap, MessageSquare, Disc, HardDriveDownload,
 } from 'lucide-react';
-import { useFilm, useTasks } from '../hooks/useApi';
+import { useFilm, useTasks, useActiveTaskPolling } from '../hooks/useApi';
 import { api } from '../api/client';
 import { StatusBadge, TaskProgressBar } from '../components/TaskStatus';
 import SubtitleUploader from '../components/SubtitleUploader';
-import type { Task, Character, GlossaryEntry, ExistingSubtitle } from '../types';
+import type { Task, Character, GlossaryEntry, ExistingSubtitle, TrackInfo } from '../types';
 
 type Tab = 'profile' | 'translation';
 
@@ -30,7 +30,11 @@ export default function FilmDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { data: film, loading, error, refresh: refreshFilm } = useFilm(id!);
-  const { data: tasks, refresh: refreshTasks } = useTasks();
+  // Poll tasks actively when any are running, otherwise use static fetch
+  const { tasks: polledTasks, hasActive } = useActiveTaskPolling(3000);
+  const { data: staticTasks, refresh: refreshTasks } = useTasks();
+  const filmTasks = (hasActive ? (polledTasks ?? []) : (staticTasks ?? []))
+    .filter((t) => t.film_id === id);
   const [tab, setTab] = useState<Tab>('profile');
   const [uploading, setUploading] = useState(false);
   const [starting, setStarting] = useState<string | null>(null);
@@ -40,8 +44,10 @@ export default function FilmDetailPage() {
   const [analyzing, setAnalyzing] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const [whisperModel, setWhisperModel] = useState('medium');
-
-  const filmTasks = tasks?.filter((t) => t.film_id === id) ?? [];
+  const [tracks, setTracks] = useState<{ audio: TrackInfo[]; subtitle: TrackInfo[]; video: TrackInfo[] } | null>(null);
+  const [loadingTracks, setLoadingTracks] = useState(false);
+  const [extractingTracks, setExtractingTracks] = useState(false);
+  const [installing, setInstalling] = useState<string | null>(null);
 
   // Load enrichments when film is loaded
   useEffect(() => {
@@ -108,6 +114,49 @@ export default function FilmDetailPage() {
     } catch (e: any) { alert('Erreur : ' + e.message); }
   };
 
+  const onProbeTracks = async () => {
+    if (!film?.video_path) { alert('Aucun fichier vidéo trouvé.'); return; }
+    setLoadingTracks(true);
+    try {
+      const result = await api.getFilmTracks(film.id);
+      setTracks({ audio: result.audio || [], subtitle: result.subtitle || [], video: result.video || [] });
+    } catch (e: any) { alert('Erreur pistes : ' + e.message); }
+    finally { setLoadingTracks(false); }
+  };
+
+  const onExtractSubtitles = async () => {
+    setExtractingTracks(true);
+    try {
+      const result = await api.extractSubtitles(film!.id);
+      if (result.message) { alert(result.message); }
+      else { alert(`${result.tracks?.length || 0} piste(s) extraite(s)`); }
+      api.getFilmSubtitles(id!).then(setSubtitles).catch(() => {});
+      setTracks(null);
+    } catch (e: any) { alert('Extraction erreur : ' + e.message); }
+    finally { setExtractingTracks(false); }
+  };
+
+  const onCleanWorkFiles = async () => {
+    if (!confirm('Supprimer tous les fichiers de travail (audio extrait, sous-titres extraits, sorties Whisper) ?\nLe dossier source du film ne sera pas modifié.')) return;
+    try {
+      await api.cleanWorkFiles(film!.id, 'all');
+      api.getFilmSubtitles(id!).then(setSubtitles).catch(() => {});
+      setTracks(null);
+    } catch (e: any) { alert('Nettoyage erreur : ' + e.message); }
+  };
+
+  const onInstallSubtitle = async (taskId: string) => {
+    if (!confirm('Installer le sous-titre traduit dans le dossier source du film ?\nLe fichier sera placé à côté de la vidéo.')) return;
+    setInstalling(taskId);
+    try {
+      const result = await api.installSubtitle(taskId);
+      alert(`Sous-titre installé : ${result.destination}`);
+      api.getFilmSubtitles(id!).then(setSubtitles).catch(() => {});
+      refreshFilm();
+    } catch (e: any) { alert('Installation erreur : ' + e.message); }
+    finally { setInstalling(null); }
+  };
+
   if (loading) return <div className="flex items-center justify-center py-32"><div className="w-8 h-8 border-2 border-brand-500/30 border-t-brand-500 rounded-full animate-spin" /></div>;
   if (error || !film) return <div className="text-red-400 text-center py-20">Film non trouvé</div>;
 
@@ -152,6 +201,8 @@ export default function FilmDetailPage() {
           onTranscribe={handleTranscribe} transcribing={transcribing}
           onSync={handleSync} whisperModel={whisperModel} setWhisperModel={setWhisperModel}
           onAnalyze={handleAnalyze} analyzing={analyzing}
+          tracks={tracks} loadingTracks={loadingTracks} extractingTracks={extractingTracks}
+          onProbeTracks={onProbeTracks} onExtractSubtitles={onExtractSubtitles} onClearTracks={() => setTracks(null)} onCleanWorkFiles={onCleanWorkFiles} onInstall={onInstallSubtitle} installing={installing}
         />
       )}
     </div>
@@ -227,6 +278,8 @@ function TranslationTab({
   onStart, starting, onUpload, uploading, onTranslateExisting,
   onTranscribe, transcribing, onSync, whisperModel, setWhisperModel,
   onAnalyze, analyzing,
+  tracks, loadingTracks, extractingTracks,
+  onProbeTracks, onExtractSubtitles, onClearTracks, onCleanWorkFiles, onInstall, installing,
 }: {
   filmId: string; film: any; filmTasks: Task[]; subtitles: ExistingSubtitle[];
   pendingTasks: Task[]; completedTasks: Task[];
@@ -237,6 +290,12 @@ function TranslationTab({
   onSync: (sub: ExistingSubtitle) => void;
   whisperModel: string; setWhisperModel: (m: string) => void;
   onAnalyze: () => void; analyzing: boolean;
+  tracks: { audio: TrackInfo[]; subtitle: TrackInfo[]; video: TrackInfo[] } | null;
+  loadingTracks: boolean; extractingTracks: boolean;
+  onProbeTracks: () => void; onExtractSubtitles: () => void; onClearTracks: () => void;
+  onCleanWorkFiles: () => void;
+  onInstall: (taskId: string) => void;
+  installing: string | null;
 }) {
   const hasSubtitles = subtitles.length > 0;
   const hasVideo = !!film.video_path;
@@ -300,7 +359,14 @@ function TranslationTab({
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0">
                     {task.status === 'pending' && <button onClick={() => onStart(task.id)} disabled={!!starting} className="btn-primary !py-1.5 !px-3 !text-xs">{starting === task.id ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />} Lancer</button>}
-                    {task.status === 'completed' && <a href={`/api/tasks/${task.id}/download`} className="btn-primary !py-1.5 !px-3 !text-xs"><Download className="w-3 h-3" /> Télécharger</a>}
+                    {task.status === 'completed' && (
+                      <>
+                        <a href={`/api/tasks/${task.id}/download`} className="btn-primary !py-1.5 !px-3 !text-xs"><Download className="w-3 h-3" /> Télécharger</a>
+                        <button onClick={() => onInstall(task.id)} disabled={!!installing} className="btn-secondary !py-1.5 !px-3 !text-xs">
+                          {installing === task.id ? <RefreshCw className="w-3 h-3 animate-spin" /> : <HardDriveDownload className="w-3 h-3" />} Installer
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               ))}
@@ -340,6 +406,76 @@ function TranslationTab({
             </>
           )}
         </div>
+
+        {/* Embedded tracks */}
+        {hasVideo && (
+        <div className="glass-card p-4 space-y-3">
+          <h3 className="text-sm font-semibold text-gray-200 flex items-center gap-2"><Disc className="w-4 h-4 text-cyan-400" /> Pistes embarquées</h3>
+          <p className="text-xs text-gray-500">Inspectez les pistes audio et sous-titres intégrées dans le fichier MKV/MP4.</p>
+          {!tracks ? (
+            <button onClick={onProbeTracks} disabled={loadingTracks} className="btn-secondary w-full !text-xs">
+              {loadingTracks ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Disc className="w-3 h-3" />} Analyser les pistes
+            </button>
+          ) : (
+            <div className="space-y-3">
+              {tracks.subtitle.length > 0 && (
+                <div>
+                  <p className="text-[10px] font-semibold text-gray-400 uppercase mb-1">Sous-titres intégrés</p>
+                  <div className="space-y-1">
+                    {tracks.subtitle.map((t: TrackInfo) => (
+                      <div key={t.index} className="flex items-center justify-between text-xs">
+                        <span className="text-gray-300 truncate">
+                          {(t.title && t.title !== t.language) ? t.title : (LANG_NAMES[t.language || 'und'] || t.language?.toUpperCase() || 'Inconnu')}
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <span className="text-[10px] text-gray-600 font-mono">{t.codec}</span>
+                          {t.default && <span className="text-[10px] badge bg-emerald-500/15 text-emerald-300">Défaut</span>}
+                          {t.forced && <span className="text-[10px] badge bg-orange-500/15 text-orange-300">Forcé</span>}
+                          {t.extractable === false && <span className="text-[10px] text-gray-600">🖼️ Image</span>}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {tracks.audio.length > 0 && (
+                <div>
+                  <p className="text-[10px] font-semibold text-gray-400 uppercase mb-1">Pistes audio</p>
+                  <div className="space-y-1">
+                    {tracks.audio.map((t: TrackInfo) => (
+                      <div key={t.index} className="flex items-center justify-between text-xs">
+                        <span className="text-gray-300 truncate">{t.title || (LANG_NAMES[t.language || 'und'] || t.language?.toUpperCase() || 'Inconnu')}</span>
+                        <span className="text-[10px] text-gray-600">{t.channels}ch {t.codec}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {tracks.video.length > 0 && (
+                <div>
+                  <p className="text-[10px] font-semibold text-gray-400 uppercase mb-1">Vidéo</p>
+                  <div className="space-y-1">
+                    {tracks.video.map((t: TrackInfo) => (
+                      <div key={t.index} className="text-xs text-gray-500">{t.codec} {t.width}×{t.height}</div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {tracks.subtitle.length === 0 && tracks.audio.length === 0 && (
+                <p className="text-xs text-gray-600">Aucune piste trouvée</p>
+              )}
+              {tracks.subtitle.filter((t: TrackInfo) => t.extractable !== false).length > 0 && (
+                <button onClick={onExtractSubtitles} disabled={extractingTracks} className="btn-primary w-full !text-xs">
+                  {extractingTracks ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Subtitles className="w-3 h-3" />}
+                  Extraire les sous-titres
+                </button>
+              )}
+              <button onClick={onCleanWorkFiles} className="btn-ghost w-full !text-xs text-orange-400 hover:text-orange-300">🗑️ Nettoyer fichiers de travail</button>
+              <button onClick={onClearTracks} className="btn-ghost w-full !text-xs text-gray-500">Masquer</button>
+            </div>
+          )}
+        </div>
+        )}
 
         {/* Quick stats */}
         <div className="glass-card p-4 space-y-2">

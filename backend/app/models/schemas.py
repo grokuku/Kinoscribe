@@ -148,7 +148,7 @@ class LibrarySourceOut(BaseModel):
     ssh_username: Optional[str] = None
     ssh_auth_type: Optional[str] = None
     ssh_private_key_path: Optional[str] = None
-    ssh_password: Optional[str] = None  # masked in output
+    ssh_password: Optional[str] = None  # masked in output via model_validator
     ssh_remote_path: Optional[str] = None
     # Common
     enabled: bool = True
@@ -160,6 +160,31 @@ class LibrarySourceOut(BaseModel):
     updated_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_orm_with_mask(cls, obj):
+        """Create output model, masking SSH password if present."""
+        data = {
+            "id": obj.id,
+            "library_id": obj.library_id,
+            "source_type": obj.source_type,
+            "path": obj.path,
+            "ssh_host": obj.ssh_host,
+            "ssh_port": obj.ssh_port,
+            "ssh_username": obj.ssh_username,
+            "ssh_auth_type": obj.ssh_auth_type,
+            "ssh_private_key_path": obj.ssh_private_key_path,
+            "ssh_password": "********" if obj.ssh_password else None,
+            "ssh_remote_path": obj.ssh_remote_path,
+            "enabled": obj.enabled,
+            "scan_depth": obj.scan_depth,
+            "last_scan_at": obj.last_scan_at,
+            "scan_status": obj.scan_status,
+            "scan_error": obj.scan_error,
+            "created_at": obj.created_at,
+            "updated_at": obj.updated_at,
+        }
+        return cls(**data)
 
 
 class LibraryCreate(BaseModel):
@@ -209,7 +234,7 @@ class ExistingSubtitleOut(BaseModel):
     is_forced: bool = False
     is_gendered: bool = False
     format: str = "srt"
-    source: str = "scanner"  # 'scanner' | 'uploaded'
+    source: str = "scanner"  # 'scanner' | 'uploaded' | 'extracted' | 'transcribed'
 
 
 class StartFromSubtitle(BaseModel):

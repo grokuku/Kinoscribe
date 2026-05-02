@@ -6,7 +6,7 @@ Each library has one or more sources (local paths, SSH, future: SMB/NFS).
 
 from typing import List
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +20,18 @@ from app.models.schemas import (
 )
 from app.services.scanner_service import get_scan_progress, get_all_scan_progress
 
+
+def _mask_source(source: LibrarySource) -> LibrarySourceOut:
+    """Convert ORM source to output schema, masking SSH password."""
+    return LibrarySourceOut.from_orm_with_mask(source)
+
+
+def _mask_library(library: Library) -> dict:
+    """Convert library to dict with masked source passwords."""
+    data = LibraryOut.model_validate(library).model_dump()
+    data['sources'] = [_mask_source(s).model_dump() for s in library.sources]
+    return data
+
 logger = get_logger(__name__)
 router = APIRouter(prefix="/libraries", tags=["libraries"])
 
@@ -29,7 +41,12 @@ router = APIRouter(prefix="/libraries", tags=["libraries"])
 @router.get("/", response_model=List[LibraryOut])
 async def list_libraries(session: AsyncSession = Depends(get_session)):
     result = await session.execute(select(Library))
-    return result.scalars().all()
+    libraries = result.scalars().all()
+    # Mask SSH passwords in source outputs
+    out = []
+    for lib in libraries:
+        out.append(_mask_library(lib))
+    return out
 
 
 @router.get("/{library_id}", response_model=LibraryOut)
@@ -37,7 +54,7 @@ async def get_library(library_id: str, session: AsyncSession = Depends(get_sessi
     library = await session.get(Library, library_id)
     if not library:
         raise HTTPException(404, "Library not found")
-    return library
+    return _mask_library(library)
 
 
 @router.post("/", response_model=LibraryOut, status_code=201)
@@ -47,7 +64,7 @@ async def create_library(data: LibraryCreate, session: AsyncSession = Depends(ge
     await session.commit()
     await session.refresh(library)
     logger.info("Library created", library_id=library.id, name=library.name)
-    return library
+    return _mask_library(library)
 
 
 @router.put("/{library_id}", response_model=LibraryOut)
@@ -61,7 +78,7 @@ async def update_library(library_id: str, data: LibraryUpdate, session: AsyncSes
         library.description = data.description
     await session.commit()
     await session.refresh(library)
-    return library
+    return _mask_library(library)
 
 
 @router.delete("/{library_id}")
@@ -90,6 +107,7 @@ async def delete_library(library_id: str, delete_films: bool = True, session: As
 
 @router.post("/{library_id}/sources", response_model=LibrarySourceOut, status_code=201)
 async def add_source(library_id: str, data: LibrarySourceCreate, session: AsyncSession = Depends(get_session)):
+    from app.core.crypto import encrypt
     library = await session.get(Library, library_id)
     if not library:
         raise HTTPException(404, "Library not found")
@@ -97,13 +115,14 @@ async def add_source(library_id: str, data: LibrarySourceCreate, session: AsyncS
         library_id=library_id, source_type=data.source_type, path=data.path,
         ssh_host=data.ssh_host, ssh_port=data.ssh_port or 22,
         ssh_username=data.ssh_username, ssh_auth_type=data.ssh_auth_type,
-        ssh_private_key_path=data.ssh_private_key_path, ssh_password=data.ssh_password,
+        ssh_private_key_path=data.ssh_private_key_path,
+        ssh_password=encrypt(data.ssh_password) if data.ssh_password else None,
         ssh_remote_path=data.ssh_remote_path, enabled=data.enabled, scan_depth=data.scan_depth,
     )
     session.add(source)
     await session.commit()
     await session.refresh(source)
-    return source
+    return _mask_source(source)
 
 
 @router.put("/{library_id}/sources/{source_id}", response_model=LibrarySourceOut)
@@ -118,13 +137,16 @@ async def update_source(library_id: str, source_id: str, data: LibrarySourceCrea
     source.ssh_username = data.ssh_username
     source.ssh_auth_type = data.ssh_auth_type
     source.ssh_private_key_path = data.ssh_private_key_path
-    source.ssh_password = data.ssh_password
+    # Only update password if a new one is provided; encrypt before storing
+    if data.ssh_password is not None:
+        from app.core.crypto import encrypt
+        source.ssh_password = encrypt(data.ssh_password)
     source.ssh_remote_path = data.ssh_remote_path
     source.enabled = data.enabled
     source.scan_depth = data.scan_depth
     await session.commit()
     await session.refresh(source)
-    return source
+    return _mask_source(source)
 
 
 @router.delete("/{library_id}/sources/{source_id}")
@@ -159,9 +181,10 @@ async def delete_source(library_id: str, source_id: str, delete_films: bool = Tr
 # ─── Scanning ────────────────────────────────────────────────────────────────
 
 @router.post("/{library_id}/scan")
-async def scan_library(library_id: str, background_tasks: BackgroundTasks, session: AsyncSession = Depends(get_session)):
+async def scan_library(library_id: str, session: AsyncSession = Depends(get_session)):
     """Trigger a background scan of the library."""
     from app.services.scanner_service import scanner_service
+    import asyncio
 
     # Check if already scanning
     progress = get_scan_progress(library_id)
@@ -175,7 +198,7 @@ async def scan_library(library_id: str, background_tasks: BackgroundTasks, sessi
     if not library.sources:
         raise HTTPException(400, "Library has no sources to scan")
 
-    background_tasks.add_task(scanner_service.scan_library, library_id)
+    asyncio.create_task(scanner_service.scan_library(library_id))
     logger.info("Library scan started", library_id=library_id)
     return {"status": "scanning", "library_id": library_id}
 

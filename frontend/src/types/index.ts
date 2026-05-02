@@ -28,7 +28,7 @@ export interface ExistingSubtitle {
   is_forced: boolean;
   is_gendered: boolean;
   format: string;
-  source: 'scanner' | 'uploaded';
+  source: 'scanner' | 'uploaded' | 'extracted' | 'transcribed';
 }
 
 export interface Character {
@@ -81,4 +81,45 @@ export interface GlossaryEntry {
   source_term: string;
   target_term: string;
   notes: string | null;
+}
+
+// ─── Media Tracks ─────────────────────────────────────────────
+
+export interface TrackInfo {
+  index: number;
+  codec: string;
+  language: string;
+  title?: string;
+  default?: boolean;
+  forced?: boolean;
+  channels?: number;
+  sample_rate?: string;
+  width?: number;
+  height?: number;
+  format?: string;
+  extractable?: boolean;
+}
+
+export interface ExtractedTrack {
+  index: number;
+  language: string;
+  format: string;
+  path: string;
+  title?: string;
+  default?: boolean;
+  forced?: boolean;
+}
+
+export interface WorkFile {
+  name: string;
+  path: string;
+  size: number;
+}
+
+export interface WorkFiles {
+  audio: WorkFile[];
+  subs: WorkFile[];
+  whisper: WorkFile[];
+  uploads: WorkFile[];
+  sync: WorkFile[];
 }

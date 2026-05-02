@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 from app.core.logging import get_logger
+from app.services.workdir import audio_dir, whisper_dir
 
 logger = get_logger(__name__)
 
@@ -210,6 +211,8 @@ async def transcribe_video(
     Transcribe a video file using Whisper and save as SRT.
     Returns dict with: output_path, language, segments_count
     """
+    import asyncio
+
     if not _check_whisper_available():
         raise RuntimeError(
             "faster-whisper is not installed. Install it with: "
@@ -219,15 +222,18 @@ async def transcribe_video(
     if not os.path.isfile(video_path):
         raise FileNotFoundError(f"Video not found: {video_path}")
 
-    # Output directory
-    output_dir = os.path.join("data", "uploads", film_id)
-    os.makedirs(output_dir, exist_ok=True)
+    # Output directory — use workdir for Whisper output
+    from app.services.workdir import whisper_dir
+    output_dir = whisper_dir(film_id)
 
-    # Extract audio
-    audio_path = _extract_audio(video_path, output_dir)
+    # Extract audio (run in thread to avoid blocking)
+    audio_path = await asyncio.to_thread(_extract_audio, video_path, audio_dir(film_id))
+    # Also save SRT to the whisper dir
 
-    # Transcribe
-    segments = _whisper_transcribe(audio_path, language=language, model_size=model_size)
+    # Transcribe (run in thread — this is CPU-bound and blocks the event loop)
+    segments = await asyncio.to_thread(
+        _whisper_transcribe, audio_path, language, model_size
+    )
     if not segments:
         raise RuntimeError("Whisper produced no output")
 
@@ -239,9 +245,11 @@ async def transcribe_video(
     output_path = os.path.join(output_dir, srt_filename)
     srt_content = _segments_to_srt(segments)
 
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(srt_content)
+    def _write_srt():
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(srt_content)
 
+    await asyncio.to_thread(_write_srt)
     logger.info("Whisper SRT saved", path=output_path, segments=len(segments))
 
     # Clean up audio file
@@ -267,6 +275,8 @@ async def sync_with_whisper(
     Re-sync existing subtitles using Whisper timing.
     Keeps original text, replaces timestamps with Whisper-aligned ones.
     """
+    import asyncio
+
     if not _check_whisper_available():
         raise RuntimeError("faster-whisper is not installed. Install with: pip install faster-whisper")
 
@@ -275,19 +285,17 @@ async def sync_with_whisper(
     if not os.path.isfile(subtitle_path):
         raise FileNotFoundError(f"Subtitle not found: {subtitle_path}")
 
-    output_dir = os.path.join("data", "uploads", film_id)
-    os.makedirs(output_dir, exist_ok=True)
+    from app.services.workdir import audio_dir as get_audio_dir, whisper_dir as get_whisper_dir
+    output_dir = get_whisper_dir(film_id)
 
-    # Extract audio
-    audio_path = _extract_audio(video_path, output_dir)
+    # Extract audio and transcribe (run in thread to avoid blocking)
+    audio_path = await asyncio.to_thread(_extract_audio, video_path, get_audio_dir(film_id))
+    whisper_segments = await asyncio.to_thread(
+        _whisper_transcribe, audio_path, model_size=model_size
+    )
 
-    # Transcribe (just for timing)
-    whisper_segments = _whisper_transcribe(audio_path, model_size=model_size)
-
-    # Parse original subtitles
+    # Parse and align (CPU-light, safe to run directly)
     original_entries = _parse_srt_timestamps(subtitle_path)
-
-    # Align
     aligned = _align_subtitles(original_entries, whisper_segments)
 
     # Save synced SRT
@@ -295,8 +303,11 @@ async def sync_with_whisper(
     output_path = os.path.join(output_dir, filename)
     srt_content = _segments_to_srt(aligned)
 
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(srt_content)
+    def _write_synced():
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(srt_content)
+
+    await asyncio.to_thread(_write_synced)
 
     # Clean up
     try:

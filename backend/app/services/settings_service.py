@@ -119,6 +119,14 @@ DEFAULTS: List[dict] = [
         "options": "true,false",
         "category": "subtitles",
     },
+    # ── SSH ───────────────────────────────────────
+    {
+        "key": "ssh_known_hosts",
+        "default": "none",
+        "description": "V\u00e9rification des cl\u00e9s SSH : 'none' (accepter tout), 'auto' (utiliser ~/.ssh/known_hosts), ou chemin vers un fichier known_hosts",
+        "input_type": "text",
+        "category": "security",
+    },
     # ── TMDB ───────────────────────────────────────
     {
         "key": "tmdb_api_key",
@@ -179,12 +187,65 @@ class SettingsService:
         val = await self.get(session, key)
         return val.lower() in ("true", "1", "yes")
 
+    # ─── Validation constraints ─────────────────────────────────────────
+
+    VALIDATION: Dict[str, dict] = {
+        "cps_limit": {"type": "int", "min": 5, "max": 100},
+        "sliding_window_size": {"type": "int", "min": 0, "max": 200},
+        "batch_size": {"type": "int", "min": 1, "max": 100},
+        "llm_temperature": {"type": "float", "min": 0.0, "max": 2.0},
+        "ollama_base_url": {"type": "url"},
+    }
+
+    def _validate_value(self, key: str, value: str) -> str:
+        """Validate a setting value. Returns cleaned value or raises ValueError."""
+        constraints = self.VALIDATION.get(key)
+        if not constraints:
+            return value
+
+        ctype = constraints.get("type")
+        if ctype == "int":
+            try:
+                v = int(value)
+            except (ValueError, TypeError):
+                raise ValueError(f"{key}: must be an integer, got '{value}'")
+            vmin = constraints.get("min")
+            vmax = constraints.get("max")
+            if vmin is not None and v < vmin:
+                raise ValueError(f"{key}: must be >= {vmin}, got {v}")
+            if vmax is not None and v > vmax:
+                raise ValueError(f"{key}: must be <= {vmax}, got {v}")
+            return str(v)
+        elif ctype == "float":
+            try:
+                v = float(value)
+            except (ValueError, TypeError):
+                raise ValueError(f"{key}: must be a number, got '{value}'")
+            vmin = constraints.get("min")
+            vmax = constraints.get("max")
+            if vmin is not None and v < vmin:
+                raise ValueError(f"{key}: must be >= {vmin}, got {v}")
+            if vmax is not None and v > vmax:
+                raise ValueError(f"{key}: must be <= {vmax}, got {v}")
+            return str(v)
+        elif ctype == "url":
+            if value and not (value.startswith("http://") or value.startswith("https://")):
+                raise ValueError(f"{key}: must start with http:// or https://, got '{value}'")
+            return value.rstrip("/")
+        return value
+
     async def update(self, session: AsyncSession, updates: Dict[str, str]) -> List[Setting]:
-        """Bulk update settings. Returns updated list."""
+        """Bulk update settings with validation. Returns updated list."""
+        errors = []
         for key, value in updates.items():
             s = await session.get(Setting, key)
             if s:
-                s.value = value
+                try:
+                    s.value = self._validate_value(key, value)
+                except ValueError as e:
+                    errors.append(str(e))
+        if errors:
+            raise ValueError("; ".join(errors))
         await session.commit()
         return await self.get_all(session)
 

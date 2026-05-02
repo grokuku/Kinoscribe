@@ -4,8 +4,9 @@ Film-related API routes: CRUD + metadata.
 
 from typing import List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
+import asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -135,10 +136,9 @@ async def delete_film(
     paths_to_clean = []
     if film.poster_path and os.path.isfile(film.poster_path):
         paths_to_clean.append(film.poster_path)
-    # Clean upload dir + output dir for this film
-    for subdir in [f"data/uploads/{film_id}", f"data/output/{film_id}"]:
-        if os.path.isdir(subdir):
-            paths_to_clean.append(subdir)
+    # Clean all work/output dirs for this film
+    from app.services.workdir import clean_all_for_film
+    clean_all_for_film(film_id)
 
     await session.delete(film)
     await session.commit()
@@ -202,9 +202,13 @@ async def list_film_subtitles(
     """
     List all available subtitles for a film:
     - Scanned from the film's directory (local or cached from SSH)
-    - Previously uploaded
+    - Previously uploaded, extracted, or transcribed
     """
     from app.services.scanner_service import parse_subtitle_filename, is_gendered_language, SUBTITLE_EXTENSIONS
+    from app.services.workdir import migrate_legacy_dirs
+
+    # Ensure legacy files are migrated to new work dir structure
+    migrate_legacy_dirs(film_id)
 
     film = await session.get(Film, film_id)
     if not film:
@@ -243,32 +247,38 @@ async def list_film_subtitles(
     poster_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'posters')
     # Not relevant for subtitles, skip
 
-    # 3. Previously uploaded subtitles (in data/uploads/{film_id}/)
-    upload_dir = os.path.join("data", "uploads", film_id)
-    if os.path.isdir(upload_dir):
-        try:
-            for name in sorted(os.listdir(upload_dir)):
-                ext = Path(name).suffix.lower()
-                if ext in SUBTITLE_EXTENSIONS:
-                    full_path = os.path.join(upload_dir, name)
-                    if not os.path.isfile(full_path):
-                        continue
-                    info = parse_subtitle_filename(name)
-                    key = (name, full_path)
-                    if key not in seen:
-                        seen.add(key)
-                        results.append(ExistingSubtitleOut(
-                            filename=name,
-                            path=full_path,
-                            language=info.get("language"),
-                            is_sdh=info.get("is_sdh", False),
-                            is_forced=info.get("is_forced", False),
-                            is_gendered=is_gendered_language(info.get("language") or "und"),
-                            format=ext.lstrip("."),
-                            source="uploaded",
-                        ))
-        except PermissionError:
-            pass
+    # 3. Previously uploaded subtitles (in work dir)
+    from app.services.workdir import uploads_dir, extracted_subs_dir, whisper_dir
+
+    for sub_dir, source_tag in [
+        (uploads_dir(film_id), "uploaded"),
+        (extracted_subs_dir(film_id), "extracted"),
+        (whisper_dir(film_id), "transcribed"),
+    ]:
+        if os.path.isdir(sub_dir):
+            try:
+                for name in sorted(os.listdir(sub_dir)):
+                    ext = Path(name).suffix.lower()
+                    if ext in SUBTITLE_EXTENSIONS:
+                        full_path = os.path.join(sub_dir, name)
+                        if not os.path.isfile(full_path):
+                            continue
+                        info = parse_subtitle_filename(name)
+                        key = (name, full_path)
+                        if key not in seen:
+                            seen.add(key)
+                            results.append(ExistingSubtitleOut(
+                                filename=name,
+                                path=full_path,
+                                language=info.get("language"),
+                                is_sdh=info.get("is_sdh", False),
+                                is_forced=info.get("is_forced", False),
+                                is_gendered=is_gendered_language(info.get("language") or "und"),
+                                format=ext.lstrip("."),
+                                source=source_tag,
+                            ))
+            except PermissionError:
+                pass
 
     return results
 
@@ -278,7 +288,6 @@ async def list_film_subtitles(
 @router.post("/{film_id}/analyze")
 async def analyze_film_context(
     film_id: str,
-    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
 ):
     """Run context analysis (characters, lore, glossary) for a film without starting translation."""
@@ -354,7 +363,7 @@ async def analyze_film_context(
             except Exception as e:
                 logger.error("Context analysis failed", film_id=film_id, error=str(e))
 
-    background_tasks.add_task(_run_analysis)
+    asyncio.create_task(_run_analysis())
     return {"status": "analyzing", "film_id": film_id}
 
 
@@ -363,7 +372,6 @@ async def analyze_film_context(
 @router.post("/{film_id}/transcribe")
 async def transcribe_film(
     film_id: str,
-    background_tasks: BackgroundTasks,
     language: Optional[str] = None,
     model_size: str = "medium",
     session: AsyncSession = Depends(get_session),
@@ -395,14 +403,13 @@ async def transcribe_film(
         except Exception as e:
             logger.error("Whisper transcription failed", film_id=film_id, error=str(e))
 
-    background_tasks.add_task(_run_transcription)
+    asyncio.create_task(_run_transcription())
     return {"status": "transcribing", "film_id": film_id, "model": model_size}
 
 
 @router.post("/{film_id}/sync-subtitles")
 async def sync_subtitles(
     film_id: str,
-    background_tasks: BackgroundTasks,
     subtitle_path: str = "",
     model_size: str = "medium",
     session: AsyncSession = Depends(get_session),
@@ -433,7 +440,220 @@ async def sync_subtitles(
         except Exception as e:
             logger.error("Subtitle sync failed", film_id=film_id, error=str(e))
 
-    background_tasks.add_task(_run_sync)
+    asyncio.create_task(_run_sync())
     return {"status": "syncing", "film_id": film_id}
+
+
+# ─── Embedded tracks ──────────────────────────────────────────────────────────
+
+@router.get("/{film_id}/tracks")
+async def get_film_tracks(
+    film_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    List all embedded audio and subtitle tracks in the film's video file.
+    Requires ffmpeg/ffprobe installed on the server.
+    """
+    from app.services.media_service import probe_tracks, check_ffmpeg_available
+
+    film = await session.get(Film, film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+
+    if not film.video_path:
+        raise HTTPException(400, "No video file registered for this film. Run a library scan first.")
+
+    if not os.path.isfile(film.video_path):
+        raise HTTPException(400, f"Video file not found on disk: {film.video_path}")
+
+    if not check_ffmpeg_available():
+        raise HTTPException(501, "ffmpeg/ffprobe not installed on the server. Install both to use track discovery.")
+
+    try:
+        tracks = probe_tracks(film.video_path)
+    except Exception as e:
+        raise HTTPException(500, f"Failed to probe video: {str(e)[:200]}")
+
+    return {
+        "film_id": film_id,
+        "video_path": film.video_path,
+        "audio": tracks.get("audio", []),
+        "subtitle": tracks.get("subtitle", []),
+        "video": tracks.get("video", []),
+    }
+
+
+@router.post("/{film_id}/extract-subtitles")
+async def extract_film_subtitles(
+    film_id: str,
+    track_index: Optional[int] = None,
+    extract_all: bool = True,
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    Extract embedded subtitle tracks from the film's video file.
+
+    If extract_all=True, extracts all text-based tracks.
+    If track_index is specified, extracts only that track.
+    Extracted files are saved to data/work/{film_id}/subs/ and become
+    available via GET /films/{id}/subtitles.
+    """
+    from app.services.media_service import extract_all_subtitles, extract_subtitle_track, check_ffmpeg_available
+
+    film = await session.get(Film, film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+
+    if not film.video_path:
+        raise HTTPException(400, "No video file registered for this film.")
+
+    if not os.path.isfile(film.video_path):
+        raise HTTPException(400, f"Video file not found: {film.video_path}")
+
+    if not check_ffmpeg_available():
+        raise HTTPException(501, "ffmpeg/ffprobe not installed on the server.")
+
+    try:
+        if track_index is not None:
+            # Extract a single track
+            path = extract_subtitle_track(
+                video_path=film.video_path,
+                track_index=track_index,
+                film_id=film_id,
+            )
+            return {
+                "status": "extracted",
+                "film_id": film_id,
+                "tracks": [{"index": track_index, "path": path}],
+            }
+        else:
+            # Extract all text-based tracks
+            results = extract_all_subtitles(
+                video_path=film.video_path,
+                film_id=film_id,
+                text_only=True,
+            )
+            if not results:
+                return {
+                    "status": "no_extractable_tracks",
+                    "film_id": film_id,
+                    "tracks": [],
+                    "message": "No text-based subtitle tracks found in this video file.",
+                }
+            return {
+                "status": "extracted",
+                "film_id": film_id,
+                "tracks": results,
+            }
+    except Exception as e:
+        raise HTTPException(500, f"Subtitle extraction failed: {str(e)[:200]}")
+
+
+@router.post("/{film_id}/extract-audio")
+async def extract_film_audio(
+    film_id: str,
+    track_index: Optional[int] = None,
+    language: str = "und",
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    Extract an audio track from the film's video file as WAV.
+
+    If track_index is not specified, extracts the default audio track.
+    Output is 16kHz mono WAV (Whisper-compatible).
+    """
+    from app.services.media_service import extract_audio_track, check_ffmpeg_available
+
+    film = await session.get(Film, film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+
+    if not film.video_path:
+        raise HTTPException(400, "No video file registered for this film.")
+
+    if not os.path.isfile(film.video_path):
+        raise HTTPException(400, f"Video file not found: {film.video_path}")
+
+    if not check_ffmpeg_available():
+        raise HTTPException(501, "ffmpeg/ffprobe not installed on the server.")
+
+    try:
+        path = extract_audio_track(
+            video_path=film.video_path,
+            film_id=film_id,
+            track_index=track_index,
+            language=language,
+        )
+        return {
+            "status": "extracted",
+            "film_id": film_id,
+            "audio_path": path,
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Audio extraction failed: {str(e)[:200]}")
+
+
+# ─── Work directory management ──────────────────────────────────────────────────
+
+@router.get("/{film_id}/work-files")
+async def list_work_files(
+    film_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    List all working files for a film (audio, extracted subs, whisper output, uploads, sync).
+    Does NOT include the final translated output.
+    """
+    from app.services.workdir import list_work_files as _list_work_files, migrate_legacy_dirs
+
+    film = await session.get(Film, film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+
+    migrate_legacy_dirs(film_id)
+    return {
+        "film_id": film_id,
+        "files": _list_work_files(film_id),
+    }
+
+
+@router.delete("/{film_id}/work-files")
+async def clean_work_files(
+    film_id: str,
+    category: str = "all",
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    Clean working files for a film.
+
+    Query params:
+        category: 'all' (default), 'audio', 'subs', 'whisper', 'uploads', 'sync'
+    The film's source directory is NEVER touched.
+    The final output (translations) is NOT deleted here.
+    """
+    from app.services.workdir import clean_work_dir, clean_audio_dir
+
+    film = await session.get(Film, film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+
+    import shutil
+    categories_map = {
+        "all": lambda: clean_work_dir(film_id),
+        "audio": lambda: clean_audio_dir(film_id),
+        "subs": lambda: shutil.rmtree(os.path.join("data", "work", film_id, "subs"), ignore_errors=True),
+        "whisper": lambda: shutil.rmtree(os.path.join("data", "work", film_id, "whisper"), ignore_errors=True),
+        "uploads": lambda: shutil.rmtree(os.path.join("data", "work", film_id, "uploads"), ignore_errors=True),
+        "sync": lambda: shutil.rmtree(os.path.join("data", "work", film_id, "sync"), ignore_errors=True),
+    }
+
+    cleaner = categories_map.get(category)
+    if not cleaner:
+        raise HTTPException(400, f"Invalid category: {category}. Use: {', '.join(categories_map.keys())}")
+
+    cleaner()
+    logger.info("Cleaned work files", film_id=film_id, category=category)
+    return {"status": "cleaned", "film_id": film_id, "category": category}
 
 

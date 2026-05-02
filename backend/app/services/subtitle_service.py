@@ -181,15 +181,27 @@ class SubtitleService:
         lines: List[SubtitleLine],
         output_path: str,
     ) -> str:
-        """
+        r"""
         Write lines back to an SRT file, preserving timing.
+        pysubs2 uses \N internally for line breaks within an event,
+        so we must NOT double-encode. When we parse, pysubs2 converts
+        \N to \n in our text. When we write back, we just pass the
+        pysubs2-internal representation directly.
         """
         subs = SSAFile()
         for line in lines:
+            # pysubs2 expects \N for intra-event line breaks in SSAEvent.text
+            # If the text contains real newlines (\n), convert them to \N
+            # But do NOT double-encode: \\N in text is already pysubs2-internal
+            if "\n" in line.text and "\\N" not in line.text:
+                # Fresh newlines from our code → convert to pysubs2 internal
+                text = line.text.replace("\n", "\\N")
+            else:
+                text = line.text
             event = SSAEvent(
                 start=line.start_ms,
                 end=line.end_ms,
-                text=line.text.replace("\n", "\\N"),
+                text=text,
                 style=line.style,
             )
             subs.append(event)
@@ -226,18 +238,34 @@ class SubtitleService:
         return result
 
     def clean_sdh_from_parsed(self, parsed: ParsedSubtitle) -> ParsedSubtitle:
-        """Remove SDH tags from all lines in a parsed subtitle (for cleaner translation)."""
+        """Remove SDH tags from all lines in a parsed subtitle (for cleaner translation).
+
+        IMPORTANT: We preserve ALL original lines and their indices, even if they
+        become empty after cleaning. Empty lines will have empty text but keep
+        their index and timing. This ensures the translation batch mapping
+        (index → line) stays consistent with the original parsed subtitle.
+
+        Empty cleaned lines will be kept so that timing is preserved but the
+        text will be empty — the LLM should skip translating them.
+        """
         cleaned_lines = []
         for line in parsed.lines:
             cleaned_text = clean_sdh_tags(line.raw_text)
-            if cleaned_text:
-                cleaned_lines.append(SubtitleLine(
-                    index=line.index,
-                    start_ms=line.start_ms,
-                    end_ms=line.end_ms,
-                    text=cleaned_text,
-                    raw_text=cleaned_text,
-                    style=line.style,
-                ))
-        logger.info("SDH tags cleaned", original=len(parsed.lines), cleaned=len(cleaned_lines))
+            # Keep all lines even if cleaned text is empty (e.g. pure sound effects).
+            # The translation engine will preserve the empty text and original timing.
+            cleaned_lines.append(SubtitleLine(
+                index=line.index,
+                start_ms=line.start_ms,
+                end_ms=line.end_ms,
+                text=cleaned_text if cleaned_text else "",
+                raw_text=cleaned_text if cleaned_text else "",
+                style=line.style,
+            ))
+        empty_count = sum(1 for l in cleaned_lines if not l.text.strip())
+        logger.info(
+            "SDH tags cleaned",
+            original=len(parsed.lines),
+            cleaned=len(cleaned_lines),
+            empty_after_cleaning=empty_count,
+        )
         return ParsedSubtitle(lines=cleaned_lines, format=parsed.format, source_path=parsed.source_path)

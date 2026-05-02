@@ -4,7 +4,7 @@ Settings API routes: read, update, test connections.
 
 from typing import List
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
@@ -31,10 +31,13 @@ async def update_settings(
     body: SettingsUpdate,
     session: AsyncSession = Depends(get_session),
 ):
-    """Bulk update settings."""
-    updated = await settings_service.update(session, body.updates)
-    logger.info("Settings updated", keys=list(body.updates.keys()))
-    return updated
+    """Bulk update settings with validation."""
+    try:
+        updated = await settings_service.update(session, body.updates)
+        logger.info("Settings updated", keys=list(body.updates.keys()))
+        return updated
+    except ValueError as e:
+        raise HTTPException(422, str(e))
 
 
 @router.post("/test-ollama")

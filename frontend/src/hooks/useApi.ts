@@ -82,3 +82,74 @@ export function useTaskPolling(taskId: string, intervalMs = 2000) {
 
   return { progress, polling, stopPolling };
 }
+
+/**
+ * Poll all tasks at an interval.
+ * Returns the tasks list, whether any are active, and a refresh function.
+ */
+export function useActiveTaskPolling(intervalMs = 3000) {
+  const [tasks, setTasks] = useState<Task[] | null>(null);
+  const timerRef = useRef<number | null>(null);
+
+  const poll = useCallback(async () => {
+    try {
+      const result = await api.listTasks();
+      setTasks(result);
+    } catch {
+      // ignore polling errors
+    }
+  }, []);
+
+  useEffect(() => {
+    poll(); // initial fetch
+    timerRef.current = window.setInterval(poll, intervalMs);
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, [poll, intervalMs]);
+
+  // Check if any tasks are still active
+  const hasActive = (tasks ?? []).some(t =>
+    ['analyzing_context', 'translating', 'refining', 'pending'].includes(t.status)
+  );
+
+  return { tasks, hasActive, refresh: poll };
+}
+
+/**
+ * SSE-based real-time task updates.
+ * Falls back to polling if SSE is not available.
+ * Connects to /api/tasks/events and streams task progress.
+ */
+export function useTaskEvents() {
+  const [tasks, setTasks] = useState<Task[] | null>(null);
+  const [connected, setConnected] = useState(false);
+  const [hasActive, setHasActive] = useState(false);
+
+  useEffect(() => {
+    const eventSource = new EventSource('/api/tasks/events');
+
+    eventSource.onopen = () => {
+      setConnected(true);
+    };
+
+    eventSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        setTasks(data.tasks);
+        setHasActive(data.active);
+      } catch {
+        // ignore parse errors
+      }
+    };
+
+    eventSource.onerror = () => {
+      setConnected(false);
+      // EventSource will auto-reconnect
+    };
+
+    return () => {
+      eventSource.close();
+    };
+  }, []);
+
+  return { tasks, connected, hasActive };
+}

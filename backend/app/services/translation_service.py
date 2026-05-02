@@ -50,6 +50,7 @@ class TranslationService:
             think: Enable reasoning mode. False = draft (fast), True = refine (slow, thoughtful).
         """
         target_lang = film.target_language
+        source_lang = task.source_language or film.source_language
         characters = film.characters
         glossary = film.glossary_entries
 
@@ -64,6 +65,7 @@ class TranslationService:
             "Starting translation",
             task_id=task.id,
             total_lines=total,
+            source_lang=source_lang,
             target_lang=target_lang,
             batch_size=batch_size,
             window_size=window_size,
@@ -82,6 +84,7 @@ class TranslationService:
                         translated_batch = await self._translate_batch(
                             batch=batch,
                             context_window=context_window,
+                            source_language=source_lang,
                             target_language=target_lang,
                             char_context=char_context,
                             glossary_context=glossary_context,
@@ -169,10 +172,12 @@ class TranslationService:
             "5. Keep subtitle text concise — target under 25 characters per second.\n"
             "6. Return ONLY a JSON object with a 'lines' key containing a list of "
             "{'index': int, 'text': str} objects.\n"
-            "7. Do NOT include any explanation or commentary."
+            "7. Do NOT include any explanation or commentary.\n"
+            "8. If a source line is empty or contains only non-translatable content, "
+            "return it with an empty 'text' value."
         )
 
-        user_parts = [f"Translate the following subtitle lines to {target_language}.\n"]
+        user_parts = [f"Translate the following subtitle lines from {source_language.upper()} to {target_language.upper()}.\n"]
 
         if lore_summary:
             user_parts.append(f"STORY CONTEXT:\n{lore_summary}\n")
@@ -254,6 +259,8 @@ class TranslationService:
                 for l in batch
             )
 
+            source_lang = task.source_language or film.source_language
+
             system_msg = (
                 "You are an expert film subtitle editor. "
                 "Review and improve the following translated subtitles.\n"
@@ -267,7 +274,7 @@ class TranslationService:
             )
 
             user_parts = [
-                f"Review and improve these subtitles (target language: {film.target_language}).\n"
+                f"Review and improve these subtitles (from {source_lang.upper()} to {film.target_language.upper()} ).\n"
             ]
             if task.lore_summary:
                 user_parts.append(f"STORY CONTEXT:\n{task.lore_summary}\n")

@@ -5,11 +5,12 @@ Translation task routes: start, monitor, download.
 import os
 from typing import List
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
+from app.services.task_runner import start_task
 from app.core.database import get_session
 from app.models.database import Film, TranslationTask, TaskStatusEnum, GlossaryEntry
 from app.models.schemas import TaskOut, TaskProgressOut, GlossaryEntryOut
@@ -50,10 +51,10 @@ async def upload_subtitle_and_start(
     if not film:
         raise HTTPException(404, "Film not found")
 
-    # Save uploaded file to disk
-    upload_dir = os.path.join("data", "uploads", film_id)
-    os.makedirs(upload_dir, exist_ok=True)
-    file_path = os.path.join(upload_dir, file.filename or "subtitle.srt")
+    # Save uploaded file to work dir
+    from app.services.workdir import uploads_dir
+    upload_path = uploads_dir(film_id)
+    file_path = os.path.join(upload_path, file.filename or "subtitle.srt")
 
     content = await file.read()
     with open(file_path, "wb") as f:
@@ -109,7 +110,26 @@ async def translate_existing_subtitle(
         raise HTTPException(404, "Film not found")
 
     subtitle_path = data.get("subtitle_path", "")
-    if not subtitle_path or not os.path.isfile(subtitle_path):
+    if not subtitle_path:
+        raise HTTPException(400, "subtitle_path is required")
+
+    # ── Path traversal protection ────────────────────────────────────────
+    # Only allow files within known safe directories:
+    # uploads/ or the film's scanned directory
+    from app.services.workdir import WORK_BASE, OUTPUT_BASE
+
+    allowed_dirs = [
+        os.path.abspath(WORK_BASE),
+        os.path.abspath(OUTPUT_BASE),
+        os.path.abspath(os.path.join("data", "uploads")),  # legacy compat
+    ]
+    if film.path and os.path.isdir(film.path):
+        allowed_dirs.append(os.path.abspath(film.path))
+    abs_path = os.path.abspath(subtitle_path)
+    if not any(abs_path.startswith(d + os.sep) or abs_path == d for d in allowed_dirs):
+        raise HTTPException(403, "Access denied: file path is outside allowed directories")
+
+    if not os.path.isfile(subtitle_path):
         raise HTTPException(400, f"Subtitle file not found: {subtitle_path}")
 
     # Auto-detect source language
@@ -117,9 +137,9 @@ async def translate_existing_subtitle(
     sub_info = parse_subtitle_filename(filename)
     source_language = data.get("source_language") or sub_info.get("language") or "en"
 
-    # Copy to uploads dir for consistency
-    upload_dir = os.path.join("data", "uploads", film_id)
-    os.makedirs(upload_dir, exist_ok=True)
+    # Copy to work dir uploads/ for consistency
+    from app.services.workdir import uploads_dir
+    upload_dir = uploads_dir(film_id)
     dest_path = os.path.join(upload_dir, filename)
     if dest_path != subtitle_path:
         import shutil
@@ -147,7 +167,6 @@ async def translate_existing_subtitle(
 @router.post("/{task_id}/start", response_model=TaskProgressOut)
 async def start_translation(
     task_id: str,
-    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
 ):
     """Kick off the translation workflow for a task."""
@@ -161,7 +180,7 @@ async def start_translation(
     task.status = TaskStatusEnum.analyzing_context
     await session.commit()
 
-    background_tasks.add_task(_run_translation_workflow, task_id)
+    start_task(task_id, _run_translation_workflow(task_id))
     logger.info("Translation started", task_id=task_id)
     return task
 
@@ -235,6 +254,53 @@ async def download_translated_subtitle(
         filename=task.target_filename or "translated.srt",
         media_type="application/octet-stream",
     )
+
+
+@router.post("/{task_id}/install")
+async def install_subtitle_to_source(
+    task_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    Install the translated subtitle file next to the video in the source directory.
+
+    For local films: copies to the film's directory.
+    For SSH films: uploads via SFTP.
+    The film's source directory is NEVER modified by any other Kinoscribe operation.
+    """
+    from app.services.install_service import install_subtitle_to_source as do_install
+
+    task = await session.get(TranslationTask, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    if task.status != TaskStatusEnum.completed:
+        raise HTTPException(409, "Translation not yet completed")
+    if not task.target_path or not os.path.exists(task.target_path):
+        raise HTTPException(404, "Output file not found")
+
+    film = await session.get(Film, task.film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+    if not film.path and not film.video_path:
+        raise HTTPException(400, "No source directory or video path for this film")
+
+    try:
+        dest_path = await do_install(film, task_id, session)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+    except Exception as e:
+        logger.error("Install failed", task_id=task_id, error=str(e))
+        raise HTTPException(500, f"Install failed: {str(e)[:200]}")
+
+    return {
+        "status": "installed",
+        "task_id": task_id,
+        "destination": dest_path,
+    }
 
 
 # ─── Background workflow ────────────────────────────────────────────────────
@@ -355,10 +421,10 @@ async def _run_translation_workflow(task_id: str):
                 )
 
             # ── Phase 5: Write output ───────────────────────────────
-            output_dir = os.path.join("data", "output", film.id)
-            os.makedirs(output_dir, exist_ok=True)
+            from app.services.workdir import output_dir as get_output_dir
+            out_dir = get_output_dir(film.id)
             base_name = os.path.splitext(task.source_filename)[0]
-            output_path = os.path.join(output_dir, f"{base_name}.{film.target_language}.srt")
+            output_path = os.path.join(out_dir, f"{base_name}.{film.target_language}.srt")
 
             sub_svc.write_srt(translated_lines, output_path)
             task.target_filename = f"{base_name}.{film.target_language}.srt"

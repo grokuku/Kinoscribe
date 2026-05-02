@@ -199,6 +199,11 @@ class FilesystemProvider(ABC):
     @abstractmethod
     async def exists(self, path: str) -> bool: ...
 
+    @abstractmethod
+    async def write_bytes(self, path: str, data: bytes) -> None:
+        """Write bytes to a file. Creates parent directories if needed."""
+        ...
+
 
 class LocalFilesystem(FilesystemProvider):
     """Local filesystem provider."""
@@ -232,6 +237,12 @@ class LocalFilesystem(FilesystemProvider):
     async def exists(self, path: str) -> bool:
         return os.path.exists(path)
 
+    async def write_bytes(self, path: str, data: bytes) -> None:
+        """Write bytes to a local file, creating parent directories."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'wb') as f:
+            f.write(data)
+
 
 class SSHFilesystem(FilesystemProvider):
     """SSH/SFTP filesystem provider using asyncssh."""
@@ -255,12 +266,36 @@ class SSHFilesystem(FilesystemProvider):
     async def connect(self):
         """Establish SSH connection and open SFTP session."""
         import asyncssh
+        from app.core.config import settings
+
+        # Resolve known_hosts policy
+        known_hosts_policy = None  # default: accept all
+        kh_setting = settings.ssh_known_hosts.strip().lower()
+        if kh_setting == "auto":
+            # Use the system's known_hosts file
+            import os
+            default_kh = os.path.expanduser("~/.ssh/known_hosts")
+            if os.path.isfile(default_kh):
+                known_hosts_policy = asyncssh.import_known_hosts(default_kh)
+                logger.info("Using system known_hosts", path=default_kh)
+            else:
+                logger.warning("No ~/.ssh/known_hosts found, accepting all host keys")
+                known_hosts_policy = None
+        elif kh_setting and kh_setting not in ("none", ""):
+            # Assume it's a file path
+            import os
+            if os.path.isfile(kh_setting):
+                known_hosts_policy = asyncssh.import_known_hosts(kh_setting)
+                logger.info("Using custom known_hosts", path=kh_setting)
+            else:
+                logger.warning("known_hosts file not found, accepting all keys", path=kh_setting)
+                known_hosts_policy = None
 
         kwargs = {
             'host': self.host,
             'port': self.port,
             'username': self.username,
-            'known_hosts': None,  # accept all host keys (dev mode)
+            'known_hosts': known_hosts_policy,
         }
         if self.private_key_path:
             kwargs['client_keys'] = [self.private_key_path]
@@ -363,6 +398,30 @@ class SSHFilesystem(FilesystemProvider):
             return True
         except Exception:
             return False
+
+    async def write_bytes(self, path: str, data: bytes) -> None:
+        """Write bytes to a remote file via SFTP. Creates parent directories."""
+        import asyncssh
+        if not self._sftp:
+            raise RuntimeError("SFTP not connected")
+        # Ensure parent directory exists
+        parent = os.path.dirname(path)
+        try:
+            await self._sftp.stat(parent)
+        except (asyncssh.SFTPError, asyncssh.SFTPFailure, Exception):
+            # Try to create parent directories recursively
+            parts = parent.split('/')
+            current = ''
+            for part in parts:
+                if not part:
+                    continue
+                current = current + '/' + part if current else '/' + part
+                try:
+                    await self._sftp.stat(current)
+                except (asyncssh.SFTPError, asyncssh.SFTPFailure, Exception):
+                    await self._sftp.mkdir(current)
+        async with self._sftp.open(path, 'wb') as f:
+            await f.write(data)
 
 
 # ─── Directory scanning ────────────────────────────────────────────────────────
@@ -761,11 +820,12 @@ class ScannerService:
 
     async def _connect_ssh(self, source, progress: ScanProgress) -> Optional[SSHFilesystem]:
         """Connect to SSH source. Returns filesystem or None on failure."""
+        from app.core.crypto import decrypt
         ssh = SSHFilesystem(
             host=source.ssh_host,
             port=source.ssh_port or 22,
             username=source.ssh_username or 'root',
-            password=source.ssh_password if source.ssh_auth_type == 'password' else None,
+            password=decrypt(source.ssh_password) if source.ssh_auth_type == 'password' else None,
             private_key_path=source.ssh_private_key_path if source.ssh_auth_type == 'key' else None,
         )
         try:

@@ -77,7 +77,6 @@ def migrate():
         "video_path": "TEXT",
         "poster_path": "TEXT",
         "has_existing_subs": "INTEGER DEFAULT 0",
-        "nfo_parsed": "TEXT",  # JSON blob for NFO data
     }
 
     # Get existing columns
@@ -97,8 +96,7 @@ def migrate():
         else:
             print(f"⏭️  Column films.{col_name} already exists")
 
-    # 4. Add nfo_parsed column if missing (it was in the original model but maybe not in the DB)
-    # Already handled above
+    # 4. Done
 
     conn.commit()
     conn.close()

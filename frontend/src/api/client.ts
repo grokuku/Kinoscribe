@@ -51,6 +51,18 @@ export const api = {
   syncSubtitles: (filmId: string, subtitlePath: string, modelSize?: string) =>
     request<{ status: string; film_id: string }>(`/films/${filmId}/sync-subtitles?subtitle_path=${encodeURIComponent(subtitlePath)}&model_size=${modelSize || 'medium'}`, { method: 'POST' }),
 
+  // Embedded tracks
+  getFilmTracks: (filmId: string) =>
+    request<{ film_id: string; video_path: string; audio: TrackInfo[]; subtitle: TrackInfo[]; video: TrackInfo[] }>(`/films/${filmId}/tracks`),
+  extractSubtitles: (filmId: string, trackIndex?: number, extractAll?: boolean) =>
+    request<{ status: string; film_id: string; tracks: ExtractedTrack[]; message?: string }>(`/films/${filmId}/extract-subtitles?track_index=${trackIndex ?? ''}&extract_all=${extractAll ?? true}`, { method: 'POST' }),
+  extractAudio: (filmId: string, trackIndex?: number, language?: string) =>
+    request<{ status: string; film_id: string; audio_path: string }>(`/films/${filmId}/extract-audio?track_index=${trackIndex ?? ''}&language=${language || 'und'}`, { method: 'POST' }),
+  getWorkFiles: (filmId: string) =>
+    request<{ film_id: string; files: WorkFiles }>(`/films/${filmId}/work-files`),
+  cleanWorkFiles: (filmId: string, category?: string) =>
+    request<{ status: string; film_id: string; category: string }>(`/films/${filmId}/work-files?category=${category || 'all'}`, { method: 'DELETE' }),
+
   // Tasks
   uploadSubtitle: (filmId: string, file: File) => {
     const form = new FormData();
@@ -68,6 +80,8 @@ export const api = {
   getTaskProgress: (id: string) => request<TaskProgress>(`/tasks/${id}/progress`),
   getGlossary: (taskId: string) =>
     request<GlossaryEntry[]>(`/tasks/${taskId}/glossary`),
+  installSubtitle: (taskId: string) =>
+    request<{ status: string; task_id: string; destination: string }>(`/tasks/${taskId}/install`, { method: 'POST' }),
 
   // Settings
   getSettings: () => request<Setting[]>('/settings/'),
@@ -83,4 +97,4 @@ export const api = {
     ),
 };
 
-import type { Character, Task, TaskProgress, GlossaryEntry, Setting, ExistingSubtitle } from '../types';
+import type { Character, Task, TaskProgress, GlossaryEntry, Setting, ExistingSubtitle, TrackInfo, ExtractedTrack, WorkFiles } from '../types';

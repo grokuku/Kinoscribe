@@ -14,6 +14,7 @@ from app.api.films import router as films_router
 from app.api.tasks import router as tasks_router
 from app.api.settings import router as settings_router
 from app.api.libraries import router as libraries_router
+from app.api.events import router as events_router
 
 logger = get_logger(__name__)
 
@@ -29,10 +30,66 @@ async def lifespan(app: FastAPI):
     # Seed settings from env defaults if first boot
     from app.core.database import async_session
     from app.services.settings_service import settings_service
+    ssvc = settings_service
     async with async_session() as session:
-        await settings_service.seed_if_empty(session)
+        await ssvc.seed_if_empty(session)
+
+    # ── Recover stale tasks ────────────────────────────────────────────
+    # If the process was restarted while tasks were running,
+    # mark them as failed so the user can retry.
+    from app.models.database import TranslationTask, LibrarySource
+    from app.models.database import TaskStatusEnum as TSE
+    stale_statuses = ("analyzing_context", "translating", "refining")
+    recovered = 0
+    async with async_session() as session:
+        from sqlalchemy import select as sa_select
+        result = await session.execute(
+            sa_select(TranslationTask).where(
+                TranslationTask.status.in_(stale_statuses)
+            )
+        )
+        for task in result.scalars().all():
+            task.status = TSE.failed
+            task.error_message = "Task interrupted by server restart"
+            recovered += 1
+        # Also recover stale library scans
+        result2 = await session.execute(
+            sa_select(LibrarySource).where(
+                LibrarySource.scan_status == "scanning"
+            )
+        )
+        for source in result2.scalars().all():
+            source.scan_status = "idle"
+            source.scan_error = "Scan interrupted by server restart"
+            recovered += 1
+        if recovered:
+            await session.commit()
+            logger.info("Recovered stale tasks/sources", count=recovered)
+
+    # ── Migrate cleartext SSH passwords to encrypted ────────────────────
+    from app.core.crypto import is_encrypted, encrypt
+    async with async_session() as session:
+        result = await session.execute(
+            sa_select(LibrarySource).where(
+                LibrarySource.ssh_password.isnot(None),
+                LibrarySource.ssh_password != "",  # type: ignore
+            )
+        )
+        migrated = 0
+        for source in result.scalars().all():
+            if source.ssh_password and not is_encrypted(source.ssh_password):
+                source.ssh_password = encrypt(source.ssh_password)
+                migrated += 1
+        if migrated:
+            await session.commit()
+            logger.info("Migrated SSH passwords to encrypted storage", count=migrated)
 
     logger.info("Database initialized, settings ready")
+
+    # ── Recover pending translation tasks ───────────────────────────────
+    # Tasks in 'pending' state were never started (e.g. uploaded but not translated)
+    from app.services.task_runner import recover_pending_tasks
+    await recover_pending_tasks()
 
     # Start auto-scan scheduler
     import asyncio
@@ -96,7 +153,7 @@ async def _auto_scan_scheduler():
 
 app = FastAPI(
     title="Kinoscribe",
-    version="0.4.0",
+    version="0.4.1",
     lifespan=lifespan,
 )
 
@@ -116,6 +173,7 @@ app.include_router(films_router, prefix="/api")
 app.include_router(tasks_router, prefix="/api")
 app.include_router(settings_router, prefix="/api")
 app.include_router(libraries_router, prefix="/api")
+app.include_router(events_router, prefix="/api")
 
 
 @app.get("/")

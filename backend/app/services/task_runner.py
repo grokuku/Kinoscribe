@@ -90,7 +90,15 @@ async def recover_pending_tasks():
     logger.info("Recovering pending tasks", count=len(pending))
     for task in pending:
         try:
-            from app.api.tasks import _run_translation_workflow
-            start_task(task.id, _run_translation_workflow(task.id))
+            task_type = getattr(task, 'task_type', 'translation') or 'translation'
+            if task_type == 'sync':
+                from app.api.tasks import _run_sync_workflow
+                start_task(task.id, _run_sync_workflow(task.id))
+            elif task_type == 'improve':
+                from app.api.tasks import _run_improve_workflow
+                start_task(task.id, _run_improve_workflow(task.id))
+            else:
+                from app.api.tasks import _run_translation_workflow
+                start_task(task.id, _run_translation_workflow(task.id))
         except Exception as e:
             logger.error("Failed to recover task", task_id=task.id, error=str(e))

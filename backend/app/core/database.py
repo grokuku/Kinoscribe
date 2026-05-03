@@ -61,10 +61,26 @@ async def _migrate_phase5() -> None:
             "video_path": "TEXT",
             "poster_path": "TEXT",
             "has_existing_subs": "INTEGER DEFAULT 0",
+            "lore_summary": "TEXT",
+            "analysis_status": "TEXT DEFAULT 'idle'",
         }
 
         for col_name, col_type in new_columns.items():
             if col_name not in existing:
                 await conn.execute(sqlalchemy.text(
                     f"ALTER TABLE films ADD COLUMN {col_name} {col_type}"
+                ))
+
+        # Check columns in translation_tasks table
+        result = await conn.execute(sqlalchemy.text("PRAGMA table_info(translation_tasks)"))
+        task_cols = {row[1] for row in result}
+
+        task_new_columns = {
+            "task_type": "TEXT DEFAULT 'translation'",
+        }
+
+        for col_name, col_type in task_new_columns.items():
+            if col_name not in task_cols:
+                await conn.execute(sqlalchemy.text(
+                    f"ALTER TABLE translation_tasks ADD COLUMN {col_name} {col_type}"
                 ))

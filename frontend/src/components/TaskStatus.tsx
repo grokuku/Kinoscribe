@@ -1,11 +1,15 @@
 import type { TaskStatus } from '../types';
-import { CheckCircle2, Loader2, AlertCircle, Clock, Brain, Pen, Sparkles } from 'lucide-react';
+import { CheckCircle2, Loader2, AlertCircle, Clock, Brain, Pen, Sparkles, Disc, Mic, RefreshCw, ArrowLeftRight } from 'lucide-react';
 
 const statusConfig: Record<TaskStatus, { label: string; color: string; icon: typeof Clock; glow: string }> = {
   pending:            { label: 'En attente',         color: 'text-gray-400 bg-gray-500/10',     glow: '', icon: Clock },
   analyzing_context:  { label: 'Analyse du contexte', color: 'text-purple-300 bg-purple-500/10', glow: 'shadow-purple-500/20', icon: Brain },
   translating:        { label: 'Traduction',          color: 'text-blue-300 bg-blue-500/10',      glow: 'shadow-blue-500/20',  icon: Pen },
   refining:           { label: 'Affinage',           color: 'text-indigo-300 bg-indigo-500/10',   glow: 'shadow-indigo-500/20', icon: Sparkles },
+  extracting:         { label: 'Extraction',         color: 'text-cyan-300 bg-cyan-500/10',       glow: 'shadow-cyan-500/20',   icon: Disc },
+  transcribing:       { label: 'Transcription',      color: 'text-violet-300 bg-violet-500/10',   glow: 'shadow-violet-500/20', icon: Mic },
+  syncing:            { label: 'Synchronisation',     color: 'text-amber-300 bg-amber-500/10',    glow: 'shadow-amber-500/20',  icon: ArrowLeftRight },
+  rescanning:         { label: 'Rescan',              color: 'text-teal-300 bg-teal-500/10',      glow: 'shadow-teal-500/20',   icon: RefreshCw },
   completed:          { label: 'Terminé',             color: 'text-emerald-300 bg-emerald-500/10', glow: '', icon: CheckCircle2 },
   failed:             { label: 'Échoué',              color: 'text-red-300 bg-red-500/10',        glow: '', icon: AlertCircle },
 };

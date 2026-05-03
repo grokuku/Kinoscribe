@@ -36,8 +36,22 @@ class TaskStatusEnum(str, enum.Enum):
     analyzing_context = "analyzing_context"
     translating = "translating"
     refining = "refining"
+    extracting = "extracting"
+    transcribing = "transcribing"
+    syncing = "syncing"
+    rescanning = "rescanning"
     completed = "completed"
     failed = "failed"
+
+
+class TaskTypeEnum(str, enum.Enum):
+    translation = "translation"
+    improve = "improve"
+    sync = "sync"
+    transcription = "transcription"
+    extract_subs = "extract_subs"
+    extract_audio = "extract_audio"
+    analyze = "analyze"
 
 
 class SubtitleFormatEnum(str, enum.Enum):
@@ -65,6 +79,10 @@ class Film(Base):
 
     # Raw NFO / external metadata stored as JSON blob
     raw_metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    # Context analysis result
+    lore_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    analysis_status: Mapped[str] = mapped_column(String, default="idle")  # idle | analyzing | failed
 
     # Library / file system integration
     library_id: Mapped[Optional[str]] = mapped_column(ForeignKey("libraries.id", ondelete="SET NULL"), nullable=True)
@@ -122,6 +140,9 @@ class TranslationTask(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     film_id: Mapped[str] = mapped_column(ForeignKey("films.id"))
+
+    # Task type: translation, improve, sync, transcription, extract_subs, extract_audio, analyze
+    task_type: Mapped[str] = mapped_column(String, default="translation")
 
     # Source subtitle info
     source_filename: Mapped[str] = mapped_column(String)

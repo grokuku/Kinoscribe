@@ -3,6 +3,7 @@ Translation task routes: start, monitor, download.
 """
 
 import os
+import asyncio
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -100,8 +101,8 @@ async def translate_existing_subtitle(
     session: AsyncSession = Depends(get_session),
 ):
     """
-    Start a translation from an existing subtitle file (found by scan or upload).
-    Body: { "subtitle_path": "/path/to/film.en.srt", "source_language": "en" (optional) }
+    Start a task from an existing subtitle file (found by scan or upload).
+    Body: { "subtitle_path": "/path/to/film.en.srt", "source_language": "en" (optional), "task_type": "translation"|"improve"|"sync" (optional) }
     """
     from app.services.scanner_service import parse_subtitle_filename
 
@@ -113,9 +114,9 @@ async def translate_existing_subtitle(
     if not subtitle_path:
         raise HTTPException(400, "subtitle_path is required")
 
+    task_type = data.get("task_type", "translation")
+
     # ── Path traversal protection ────────────────────────────────────────
-    # Only allow files within known safe directories:
-    # uploads/ or the film's scanned directory
     from app.services.workdir import WORK_BASE, OUTPUT_BASE
 
     allowed_dirs = [
@@ -151,6 +152,7 @@ async def translate_existing_subtitle(
 
     task = TranslationTask(
         film_id=film_id,
+        task_type=task_type,
         source_filename=filename,
         source_format=fmt,
         source_path=dest_path,
@@ -160,7 +162,7 @@ async def translate_existing_subtitle(
     await session.commit()
     await session.refresh(task)
 
-    logger.info("Translation task from existing subtitle", film_id=film_id, path=subtitle_path, lang=source_language)
+    logger.info("Task from existing subtitle", film_id=film_id, task_type=task_type, path=subtitle_path, lang=source_language)
     return task
 
 
@@ -169,7 +171,7 @@ async def start_translation(
     task_id: str,
     session: AsyncSession = Depends(get_session),
 ):
-    """Kick off the translation workflow for a task."""
+    """Kick off the workflow for a task (translation, improve, sync, etc.)."""
     task = await session.get(TranslationTask, task_id)
     if not task:
         raise HTTPException(404, "Task not found")
@@ -177,11 +179,22 @@ async def start_translation(
     if task.status not in ("pending", "failed"):
         raise HTTPException(409, f"Task is already {task.status}")
 
-    task.status = TaskStatusEnum.analyzing_context
-    await session.commit()
+    # Dispatch based on task type
+    if task.task_type == "sync":
+        task.status = "syncing"
+        await session.commit()
+        start_task(task_id, _run_sync_workflow(task_id))
+    elif task.task_type == "improve":
+        task.status = "analyzing_context"
+        await session.commit()
+        start_task(task_id, _run_improve_workflow(task_id))
+    else:
+        # Default: translation workflow
+        task.status = TaskStatusEnum.analyzing_context
+        await session.commit()
+        start_task(task_id, _run_translation_workflow(task_id))
 
-    start_task(task_id, _run_translation_workflow(task_id))
-    logger.info("Translation started", task_id=task_id)
+    logger.info("Task started", task_id=task_id, task_type=task.task_type)
     return task
 
 
@@ -443,6 +456,201 @@ async def _run_translation_workflow(task_id: str):
 
         except Exception as e:
             logger.error("Translation workflow failed", task_id=task_id, error=str(e))
+            task = await session.get(TranslationTask, task_id)
+            if task:
+                task.status = TaskStatusEnum.failed
+                task.error_message = str(e)
+                await session.commit()
+
+
+# ─── Improve workflow ─────────────────────────────────────────────────────────
+
+async def _run_improve_workflow(task_id: str):
+    """
+    Improve an existing target-language subtitle.
+    Uses context analysis + LLM to re-translate while preserving timings.
+    """
+    from app.core.database import async_session
+
+    async with async_session() as session:
+        await settings_service.seed_if_empty(session)
+
+        ollama_url = await settings_service.get(session, "ollama_base_url")
+        ollama_model = await settings_service.get(session, "ollama_model")
+        ollama_refine_model = await settings_service.get(session, "ollama_refine_model")
+        cps_limit = await settings_service.get_int(session, "cps_limit")
+        window_size = await settings_service.get_int(session, "sliding_window_size")
+        batch_size = await settings_service.get_int(session, "batch_size")
+        temperature = await settings_service.get_float(session, "llm_temperature")
+        draft_think = await settings_service.get_bool(session, "draft_think")
+        refine_think = await settings_service.get_bool(session, "refine_think")
+
+        # Use refine model for improvement pass
+        refine_model = ollama_refine_model.strip() if ollama_refine_model and ollama_refine_model.strip() else ollama_model
+
+        llm = OllamaProvider(base_url=ollama_url, model=refine_model)
+        ctx = ContextService(llm)
+        sub_svc = SubtitleService(cps_limit=cps_limit)
+        tx = TranslationService(llm, ctx, sub_svc)
+
+        task = await session.get(TranslationTask, task_id)
+        if not task:
+            logger.error("Task disappeared", task_id=task_id)
+            return
+
+        film = await session.get(Film, task.film_id)
+        if not film:
+            task.status = TaskStatusEnum.failed
+            task.error_message = "Film not found"
+            await session.commit()
+            return
+
+        try:
+            # Parse existing subtitle
+            parsed = sub_svc.parse_file(task.source_path)
+            logger.info("Subtitles parsed for improvement", task_id=task_id, lines=len(parsed.lines))
+
+            # Build context
+            task.status = TaskStatusEnum.analyzing_context
+            await session.commit()
+
+            characters = await ctx.build_character_profiles(film, parsed, sub_svc)
+            from app.models.database import Character, GlossaryEntry
+            existing_chars = await session.execute(
+                select(Character).where(Character.film_id == film.id)
+            )
+            for c in existing_chars.scalars().all():
+                await session.delete(c)
+            for c in characters:
+                session.add(c)
+            await session.commit()
+
+            lore = await ctx.generate_lore_summary(parsed, characters)
+            task.lore_summary = lore
+            film.lore_summary = lore
+            await session.commit()
+
+            # Translate (improve mode uses the source subtitle as both source and reference)
+            task.status = TaskStatusEnum.translating
+            await session.commit()
+
+            translated_lines = await tx.translate_film_subtitles(
+                task, film, parsed,
+                window_size=window_size,
+                batch_size=batch_size,
+                temperature=temperature,
+                think=refine_think,
+                db_session=session,
+            )
+
+            # Write output
+            from app.services.workdir import output_dir as get_output_dir
+            out_dir = get_output_dir(film.id)
+            base_name = os.path.splitext(task.source_filename)[0]
+            # Add .improved suffix to distinguish from original translation
+            output_path = os.path.join(out_dir, f"{base_name}.improved.{film.target_language}.srt")
+
+            sub_svc.write_srt(translated_lines, output_path)
+            task.target_filename = f"{base_name}.improved.{film.target_language}.srt"
+            task.target_path = output_path
+
+            task.status = TaskStatusEnum.completed
+            task.progress_pct = 100
+            await session.commit()
+
+            logger.info("Improve workflow complete", task_id=task_id, output=output_path)
+
+        except Exception as e:
+            logger.error("Improve workflow failed", task_id=task_id, error=str(e))
+            task = await session.get(TranslationTask, task_id)
+            if task:
+                task.status = TaskStatusEnum.failed
+                task.error_message = str(e)
+                await session.commit()
+
+
+# ─── Sync (Whisper) workflow ────────────────────────────────────────────────
+
+async def _run_sync_workflow(task_id: str):
+    """
+    Re-sync an existing subtitle using Whisper.
+    Adjusts timings to better match the audio.
+    """
+    from app.core.database import async_session
+    from app.services.whisper_service import sync_with_whisper
+    from app.services.media_service import extract_audio_track
+    from app.services.workdir import audio_dir, whisper_dir
+
+    async with async_session() as session:
+        task = await session.get(TranslationTask, task_id)
+        if not task:
+            logger.error("Task disappeared", task_id=task_id)
+            return
+
+        film = await session.get(Film, task.film_id)
+        if not film:
+            task.status = TaskStatusEnum.failed
+            task.error_message = "Film not found"
+            await session.commit()
+            return
+
+        try:
+            # Extract audio if not already present
+            audio_files = os.listdir(audio_dir(film.id)) if os.path.isdir(audio_dir(film.id)) else []
+            audio_path = None
+            for f in audio_files:
+                if f.endswith('.wav'):
+                    audio_path = os.path.join(audio_dir(film.id), f)
+                    break
+
+            if not audio_path:
+                if not film.video_path or not os.path.isfile(film.video_path):
+                    task.status = TaskStatusEnum.failed
+                    task.error_message = "No video file found for audio extraction"
+                    await session.commit()
+                    return
+                task.status = TaskStatusEnum.extracting
+                task.progress_pct = 10
+                await session.commit()
+                audio_path = await asyncio.to_thread(extract_audio_track, film.video_path, task.source_language or 'und')
+
+            task.status = TaskStatusEnum.syncing
+            task.progress_pct = 30
+            await session.commit()
+
+            # Run Whisper sync
+            ollama_url = await settings_service.get(session, "ollama_base_url")
+            whisper_model = await settings_service.get(session, "whisper_model") or "medium"
+
+            result = await sync_with_whisper(
+                audio_path,
+                task.source_path,
+                film.id,
+                model_size=whisper_model,
+            )
+
+            # Write output
+            from app.services.workdir import output_dir as get_output_dir
+            # Result contains the synced subtitle path
+            result_path = result.get("output_path") if isinstance(result, dict) else None
+            if result_path and os.path.isfile(result_path):
+                out_dir = get_output_dir(film.id)
+                base_name = os.path.splitext(task.source_filename)[0]
+                output_path = os.path.join(out_dir, f"{base_name}.synced.{film.target_language}.srt")
+
+                import shutil
+                shutil.copy2(result_path, output_path)
+                task.target_filename = f"{base_name}.synced.{film.target_language}.srt"
+                task.target_path = output_path
+
+            task.status = TaskStatusEnum.completed
+            task.progress_pct = 100
+            await session.commit()
+
+            logger.info("Sync workflow complete", task_id=task_id, output=output_path)
+
+        except Exception as e:
+            logger.error("Sync workflow failed", task_id=task_id, error=str(e))
             task = await session.get(TranslationTask, task_id)
             if task:
                 task.status = TaskStatusEnum.failed

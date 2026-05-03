@@ -37,15 +37,18 @@ export const api = {
   getFilmLore: (filmId: string) =>
     request<{ lore_summary: string | null; task_id: string | null; task_status: string | null }>(`/films/${filmId}/lore`),
   getFilmPosterUrl: (filmId: string) => `/api/films/${filmId}/poster`,
+  getFilmVideoUrl: (filmId: string) => `/api/films/${filmId}/video-stream`,
   getFilmSubtitles: (filmId: string) =>
     request<ExistingSubtitle[]>(`/films/${filmId}/subtitles`),
-  translateExistingSubtitle: (filmId: string, subtitlePath: string, sourceLanguage?: string) =>
+  translateExistingSubtitle: (filmId: string, subtitlePath: string, sourceLanguage?: string, taskType?: string) =>
     request<Task>(`/tasks/${filmId}/translate-existing`, {
       method: 'POST',
-      body: JSON.stringify({ subtitle_path: subtitlePath, source_language: sourceLanguage }),
+      body: JSON.stringify({ subtitle_path: subtitlePath, source_language: sourceLanguage, task_type: taskType || 'translation' }),
     }),
   analyzeFilm: (filmId: string) =>
     request<{ status: string; film_id: string }>(`/films/${filmId}/analyze`, { method: 'POST' }),
+  rescanFilm: (filmId: string) =>
+    request<{ status: string; film_id: string }>(`/films/${filmId}/rescan`, { method: 'POST' }),
   transcribeFilm: (filmId: string, modelSize?: string, language?: string) =>
     request<{ status: string; film_id: string; model: string }>(`/films/${filmId}/transcribe?model_size=${modelSize || 'medium'}${language ? `&language=${language}` : ''}`, { method: 'POST' }),
   syncSubtitles: (filmId: string, subtitlePath: string, modelSize?: string) =>

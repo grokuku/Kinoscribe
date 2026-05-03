@@ -107,7 +107,11 @@ async def get_film_lore(
     film = await session.get(Film, film_id)
     if not film:
         raise HTTPException(404, "Film not found")
-    # Get the most recent completed/running task's lore
+
+    # Source 1: standalone analysis stored in film.lore_summary
+    metadata_lore = film.lore_summary
+
+    # Source 2: most recent task's lore (from translation pipeline)
     result = await session.execute(
         select(TranslationTask)
         .where(TranslationTask.film_id == film_id)
@@ -115,8 +119,13 @@ async def get_film_lore(
         .limit(1)
     )
     task = result.scalars().first()
+    task_lore = task.lore_summary if task else None
+
+    # Prefer task lore (more recent from full pipeline), fallback to metadata lore
+    lore = task_lore or metadata_lore
+
     return {
-        "lore_summary": task.lore_summary if task else None,
+        "lore_summary": lore,
         "task_id": task.id if task else None,
         "task_status": task.status if task else None,
     }
@@ -157,6 +166,96 @@ async def delete_film(
     logger.info("Film deleted", film_id=film_id)
 
 
+@router.post("/{film_id}/rescan")
+async def rescan_film(
+    film_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """Rescan a single film's directory and update its metadata."""
+    from app.services.scanner_service import LocalFilesystem, SSHFilesystem, _scan_single_directory, cache_poster_locally
+    from app.core.database import async_session
+    from app.core.crypto import decrypt
+
+    film = await session.get(Film, film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+    if not film.path:
+        raise HTTPException(400, "Film has no source directory")
+
+    # Determine the filesystem type
+    source = None
+    if film.library_id:
+        from app.models.database import LibrarySource
+        result = await session.execute(
+            select(LibrarySource).where(LibrarySource.library_id == film.library_id)
+        )
+        sources = result.scalars().all()
+        for s in sources:
+            scan_path = (s.ssh_remote_path or s.path).rstrip('/')
+            if film.path.rstrip('/').startswith(scan_path):
+                source = s
+                break
+
+    async def _do_rescan():
+        async with async_session() as s:
+            f = await s.get(Film, film_id)
+            if not f:
+                return
+            try:
+                # Choose filesystem
+                if source and source.source_type == 'ssh':
+                    fs = SSHFilesystem(
+                        host=source.ssh_host,
+                        port=source.ssh_port or 22,
+                        username=source.ssh_username or 'root',
+                        password=decrypt(source.ssh_password) if source.ssh_auth_type == 'password' else None,
+                        private_key_path=source.ssh_private_key_path if source.ssh_auth_type == 'key' else None,
+                    )
+                    await fs.connect()
+                else:
+                    fs = LocalFilesystem()
+
+                entry = await _scan_single_directory(fs, f.path, f.path)
+                if entry:
+                    # Update film metadata
+                    if entry.get('title'):
+                        f.title = entry['title']
+                    if entry.get('year') is not None:
+                        f.year = entry['year']
+                    if entry.get('director'):
+                        f.director = entry['director']
+                    if entry.get('summary'):
+                        f.summary = entry['summary']
+                    if entry.get('raw_metadata'):
+                        f.raw_metadata = entry['raw_metadata']
+                    if entry.get('video_files'):
+                        f.video_path = entry['video_files'][0]
+                    if entry.get('subtitles'):
+                        f.has_existing_subs = True
+
+                    # Handle poster
+                    poster_file = entry.get('poster_file')
+                    if poster_file:
+                        if source and source.source_type == 'ssh':
+                            cached = await cache_poster_locally(fs, poster_file, film_id)
+                            f.poster_path = cached or poster_file
+                        else:
+                            f.poster_path = poster_file
+
+                    await s.commit()
+                    logger.info("Film rescaned successfully", film_id=film_id)
+
+                # Cleanup SSH
+                if source and source.source_type == 'ssh' and isinstance(fs, SSHFilesystem):
+                    await fs.disconnect()
+
+            except Exception as e:
+                logger.error("Film rescan failed", film_id=film_id, error=str(e))
+
+    asyncio.create_task(_do_rescan())
+    return {"status": "rescanning", "film_id": film_id}
+
+
 @router.get("/{film_id}/poster")
 async def get_film_poster(
     film_id: str,
@@ -192,7 +291,101 @@ async def get_film_poster(
         raise HTTPException(500, f"Failed to read poster: {e}")
 
 
+@router.get("/{film_id}/video-stream")
+async def stream_film_video(
+    film_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """Stream the film's video file with HTTP range support for HTML5 video players."""
+    from starlette.responses import StreamingResponse
+
+    film = await session.get(Film, film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+    if not film.video_path:
+        raise HTTPException(400, "No video file registered for this film")
+    if not os.path.isfile(film.video_path):
+        raise HTTPException(404, f"Video file not found: {film.video_path}")
+
+    video_path = film.video_path
+    file_size = os.path.getsize(video_path)
+    ext = os.path.splitext(video_path)[1].lower()
+    mime_map = {'.mp4': 'video/mp4', '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo', 
+                '.mov': 'video/quicktime', '.wmv': 'video/x-ms-wmv', '.webm': 'video/webm'}
+    media_type = mime_map.get(ext, 'video/mp4')
+
+    def iterfile():
+        with open(video_path, 'rb') as f:
+            while chunk := f.read(1024 * 1024):  # 1MB chunks
+                yield chunk
+
+    headers = {
+        'Content-Length': str(file_size),
+        'Accept-Ranges': 'bytes',
+    }
+    return StreamingResponse(iterfile(), media_type=media_type, headers=headers)
+
+
 # ─── Existing subtitles ──────────────────────────────────────────────────────
+
+async def _list_film_subtitles_raw(film_id: str, session) -> list[dict]:
+    """
+    Internal helper: return raw subtitle info as list of dicts.
+    Used by both the GET endpoint and the analysis background task.
+    """
+    from app.services.scanner_service import parse_subtitle_filename, is_gendered_language, SUBTITLE_EXTENSIONS
+    from app.services.workdir import migrate_legacy_dirs, uploads_dir, extracted_subs_dir, whisper_dir
+
+    migrate_legacy_dirs(film_id)
+
+    film = await session.get(Film, film_id)
+    if not film:
+        return []
+
+    results = []
+    seen = set()
+
+    # 1. Scanned from film directory
+    if film.path and os.path.isdir(film.path):
+        try:
+            for name in sorted(os.listdir(film.path)):
+                ext = Path(name).suffix.lower()
+                if ext in SUBTITLE_EXTENSIONS:
+                    full_path = os.path.join(film.path, name)
+                    if not os.path.isfile(full_path):
+                        continue
+                    info = parse_subtitle_filename(name)
+                    key = (name, full_path)
+                    if key not in seen:
+                        seen.add(key)
+                        results.append({"path": full_path, "filename": name, "language": info.get("language"), "source": "scanner"})
+        except Exception:
+            pass
+
+    # 2. From work dirs (uploads, extracted, transcribed)
+    for sub_dir, source_tag in [
+        (uploads_dir(film_id), "uploaded"),
+        (extracted_subs_dir(film_id), "extracted"),
+        (whisper_dir(film_id), "transcribed"),
+    ]:
+        if os.path.isdir(sub_dir):
+            try:
+                for name in sorted(os.listdir(sub_dir)):
+                    ext = Path(name).suffix.lower()
+                    if ext in SUBTITLE_EXTENSIONS:
+                        full_path = os.path.join(sub_dir, name)
+                        if not os.path.isfile(full_path):
+                            continue
+                        info = parse_subtitle_filename(name)
+                        key = (name, full_path)
+                        if key not in seen:
+                            seen.add(key)
+                            results.append({"path": full_path, "filename": name, "language": info.get("language"), "source": source_tag})
+            except PermissionError:
+                pass
+
+    return results
+
 
 @router.get("/{film_id}/subtitles", response_model=List[ExistingSubtitleOut])
 async def list_film_subtitles(
@@ -205,7 +398,7 @@ async def list_film_subtitles(
     - Previously uploaded, extracted, or transcribed
     """
     from app.services.scanner_service import parse_subtitle_filename, is_gendered_language, SUBTITLE_EXTENSIONS
-    from app.services.workdir import migrate_legacy_dirs
+    from app.services.workdir import migrate_legacy_dirs, uploads_dir, extracted_subs_dir, whisper_dir
 
     # Ensure legacy files are migrated to new work dir structure
     migrate_legacy_dirs(film_id)
@@ -243,12 +436,7 @@ async def list_film_subtitles(
         except Exception:
             logger.warning("Cannot list subtitles from film directory", path=film.path)
 
-    # 2. Subtitles from the poster cache dir (SSH-cached subtitles)
-    poster_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'posters')
-    # Not relevant for subtitles, skip
-
     # 3. Previously uploaded subtitles (in work dir)
-    from app.services.workdir import uploads_dir, extracted_subs_dir, whisper_dir
 
     for sub_dir, source_tag in [
         (uploads_dir(film_id), "uploaded"),
@@ -291,13 +479,18 @@ async def analyze_film_context(
     session: AsyncSession = Depends(get_session),
 ):
     """Run context analysis (characters, lore, glossary) for a film without starting translation."""
-    from app.services.scanner_service import get_scan_progress
-    # Import necessary services
     from app.core.database import async_session
 
     film = await session.get(Film, film_id)
     if not film:
         raise HTTPException(404, "Film not found")
+
+    if film.analysis_status == "analyzing":
+        raise HTTPException(409, "Analysis already in progress")
+
+    # Mark film as being analyzed
+    film.analysis_status = "analyzing"
+    await session.commit()
 
     async def _run_analysis():
         from app.services.llm_provider import OllamaProvider
@@ -310,19 +503,19 @@ async def analyze_film_context(
             f = await s.get(Film, film_id)
             if not f:
                 return
-            ollama_url = await settings_service.get(s, "ollama_base_url") or "http://ollama:11434"
-            ollama_model = await settings_service.get(s, "ollama_model") or "qwen3.5:397b-cloud"
-            llm = OllamaProvider(base_url=ollama_url, model=ollama_model)
-            ctx = ContextService(llm)
-            sub_svc = SubtitleService()
-
-            # Try to load subtitles to analyze
-            sub_path = None
-            subs = await list_film_subtitles(film_id, s)
-            if subs:
-                sub_path = subs[0].path
-
             try:
+                ollama_url = await settings_service.get(s, "ollama_base_url") or "http://ollama:11434"
+                ollama_model = await settings_service.get(s, "ollama_model") or "qwen3.5:397b-cloud"
+                llm = OllamaProvider(base_url=ollama_url, model=ollama_model)
+                ctx = ContextService(llm)
+                sub_svc = SubtitleService()
+
+                # Try to load subtitles to analyze
+                sub_path = None
+                subs_json = await _list_film_subtitles_raw(film_id, s)
+                if subs_json:
+                    sub_path = subs_json[0].get("path")
+
                 if sub_path and os.path.isfile(sub_path):
                     parsed = sub_svc.parse_file(sub_path)
 
@@ -339,6 +532,8 @@ async def analyze_film_context(
 
                     # Generate lore summary
                     lore = await ctx.generate_lore_summary(parsed, characters)
+                    f.lore_summary = lore
+                    await s.commit()
 
                     # Build glossary
                     glossary_data = await ctx.build_glossary(parsed, f.target_language)
@@ -360,8 +555,18 @@ async def analyze_film_context(
                     logger.info("Context analysis complete", film_id=film_id)
                 else:
                     logger.warning("No subtitles found for analysis", film_id=film_id)
+                    f.lore_summary = "Aucun sous-titre disponible pour l'analyse."
+                    await s.commit()
+
+                # Mark analysis complete
+                f.analysis_status = "idle"
+                await s.commit()
             except Exception as e:
                 logger.error("Context analysis failed", film_id=film_id, error=str(e))
+                f = await s.get(Film, film_id)
+                if f:
+                    f.analysis_status = "failed"
+                    await s.commit()
 
     asyncio.create_task(_run_analysis())
     return {"status": "analyzing", "film_id": film_id}

@@ -34,12 +34,12 @@ async def lifespan(app: FastAPI):
     async with async_session() as session:
         await ssvc.seed_if_empty(session)
 
-    # ── Recover stale tasks ────────────────────────────────────────────
+    # ── Recover stale tasks ───────────────────────────────────────────
     # If the process was restarted while tasks were running,
     # mark them as failed so the user can retry.
     from app.models.database import TranslationTask, LibrarySource
     from app.models.database import TaskStatusEnum as TSE
-    stale_statuses = ("analyzing_context", "translating", "refining")
+    stale_statuses = ("analyzing_context", "translating", "refining", "extracting", "transcribing", "syncing", "rescanning")
     recovered = 0
     async with async_session() as session:
         from sqlalchemy import select as sa_select

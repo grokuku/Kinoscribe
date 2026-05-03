@@ -52,7 +52,7 @@ async def task_events_generator(request: Request) -> AsyncGenerator[str, None]:
                 tasks = result.scalars().all()
 
             # Build event data
-            active_statuses = {"pending", "analyzing_context", "translating", "refining"}
+            active_statuses = {"pending", "analyzing_context", "translating", "refining", "extracting", "transcribing", "syncing", "rescanning"}
             active = any(t.status in active_statuses for t in tasks)
 
             events = []
@@ -60,6 +60,7 @@ async def task_events_generator(request: Request) -> AsyncGenerator[str, None]:
                 events.append({
                     "id": task.id,
                     "film_id": task.film_id,
+                    "task_type": getattr(task, 'task_type', 'translation') or 'translation',
                     "status": task.status,
                     "progress_pct": task.progress_pct,
                     "error_message": task.error_message,

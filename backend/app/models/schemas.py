@@ -23,8 +23,22 @@ class TaskStatus(str, Enum):
     analyzing_context = "analyzing_context"
     translating = "translating"
     refining = "refining"
+    extracting = "extracting"
+    transcribing = "transcribing"
+    syncing = "syncing"
+    rescanning = "rescanning"
     completed = "completed"
     failed = "failed"
+
+
+class TaskType(str, Enum):
+    translation = "translation"
+    improve = "improve"
+    sync = "sync"
+    transcription = "transcription"
+    extract_subs = "extract_subs"
+    extract_audio = "extract_audio"
+    analyze = "analyze"
 
 
 class SubtitleFormat(str, Enum):
@@ -61,6 +75,9 @@ class FilmOut(BaseModel):
     source_language: str
     target_language: str
     characters: List[CharacterOut] = Field(default_factory=list)
+    # Analysis
+    lore_summary: Optional[str] = None
+    analysis_status: str = "idle"  # idle | analyzing | failed
     # Library / file system integration
     library_id: Optional[str] = None
     path: Optional[str] = None
@@ -77,6 +94,7 @@ class FilmOut(BaseModel):
 class TaskOut(BaseModel):
     id: str
     film_id: str
+    task_type: str = "translation"
     status: TaskStatus = TaskStatus.pending
     source_filename: str
     source_format: str = "srt"

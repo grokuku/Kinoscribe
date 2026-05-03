@@ -11,6 +11,8 @@ export interface Film {
   source_language: string;
   target_language: string;
   characters: Character[];
+  lore_summary: string | null;
+  analysis_status: string;  // idle | analyzing | failed
   // Library / filesystem integration
   library_id: string | null;
   path: string | null;
@@ -53,12 +55,26 @@ export type TaskStatus =
   | 'analyzing_context'
   | 'translating'
   | 'refining'
+  | 'extracting'
+  | 'transcribing'
+  | 'syncing'
+  | 'rescanning'
   | 'completed'
   | 'failed';
+
+export type TaskType =
+  | 'translation'
+  | 'improve'
+  | 'sync'
+  | 'transcription'
+  | 'extract_subs'
+  | 'extract_audio'
+  | 'analyze';
 
 export interface Task {
   id: string;
   film_id: string;
+  task_type: TaskType;
   status: TaskStatus;
   source_filename: string;
   source_format: string;

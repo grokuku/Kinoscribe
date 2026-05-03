@@ -439,15 +439,66 @@ async def stream_film_video(
     )
 
 
+async def _ensure_local_video(film: Film, session) -> str:
+    """Ensure video file is accessible locally, downloading from SSH if needed.
+    Returns local path to the video file.
+    """
+    if film.video_path and os.path.isfile(film.video_path):
+        return film.video_path
+
+    # Must be SSH — download to work dir
+    if not film.video_path or not film.library_id:
+        raise HTTPException(400, "No video file available for this film.")
+
+    from app.models.database import LibrarySource
+    from app.services.scanner_service import SSHFilesystem
+    from app.core.crypto import decrypt
+    from app.services.workdir import work_dir
+
+    result = await session.execute(
+        select(LibrarySource).where(LibrarySource.library_id == film.library_id)
+    )
+    sources = result.scalars().all()
+
+    for source in sources:
+        remote_path = (source.ssh_remote_path or source.path or "").rstrip("/")
+        if source.source_type == "ssh" and film.video_path.startswith(remote_path):
+            fs = SSHFilesystem(
+                host=source.ssh_host,
+                port=source.ssh_port or 22,
+                username=source.ssh_username or "root",
+                password=decrypt(source.ssh_password) if source.ssh_auth_type == "password" else None,
+                private_key_path=source.ssh_private_key_path if source.ssh_auth_type == "key" else None,
+            )
+            await fs.connect()
+            try:
+                # Download to work dir
+                local_dir = os.path.join(work_dir(film.id), "video")
+                os.makedirs(local_dir, exist_ok=True)
+                local_path = os.path.join(local_dir, os.path.basename(film.video_path))
+                if not os.path.isfile(local_path):
+                    data = await fs.read_bytes(film.video_path)
+                    with open(local_path, "wb") as f:
+                        f.write(data)
+                return local_path
+            finally:
+                await fs.disconnect()
+
+    raise HTTPException(400, f"Video file not accessible: {film.video_path}")
+
+
 # ─── Existing subtitles ──────────────────────────────────────────────────────
 
 async def _list_film_subtitles_raw(film_id: str, session) -> list[dict]:
     """
     Internal helper: return raw subtitle info as list of dicts.
     Used by both the GET endpoint and the analysis background task.
+    Handles local AND SSH films.
     """
-    from app.services.scanner_service import parse_subtitle_filename, is_gendered_language, SUBTITLE_EXTENSIONS
+    from app.services.scanner_service import parse_subtitle_filename, is_gendered_language, SUBTITLE_EXTENSIONS, LocalFilesystem, SSHFilesystem
     from app.services.workdir import migrate_legacy_dirs, uploads_dir, extracted_subs_dir, whisper_dir
+    from app.core.crypto import decrypt
+    from app.models.database import LibrarySource, Library
 
     migrate_legacy_dirs(film_id)
 
@@ -458,24 +509,79 @@ async def _list_film_subtitles_raw(film_id: str, session) -> list[dict]:
     results = []
     seen = set()
 
-    # 1. Scanned from film directory
-    if film.path and os.path.isdir(film.path):
+    # 1. Subtitles from the film's directory (local or SSH)
+    if film.path:
         try:
-            for name in sorted(os.listdir(film.path)):
-                ext = Path(name).suffix.lower()
-                if ext in SUBTITLE_EXTENSIONS:
-                    full_path = os.path.join(film.path, name)
-                    if not os.path.isfile(full_path):
-                        continue
-                    info = parse_subtitle_filename(name)
-                    key = (name, full_path)
-                    if key not in seen:
-                        seen.add(key)
-                        results.append({"path": full_path, "filename": name, "language": info.get("language"), "source": "scanner"})
+            # Try local first
+            if os.path.isdir(film.path):
+                for name in sorted(os.listdir(film.path)):
+                    ext = Path(name).suffix.lower()
+                    if ext in SUBTITLE_EXTENSIONS:
+                        full_path = os.path.join(film.path, name)
+                        if not os.path.isfile(full_path):
+                            continue
+                        info = parse_subtitle_filename(name)
+                        key = name
+                        if key not in seen:
+                            seen.add(key)
+                            results.append({"path": full_path, "filename": name, "language": info.get("language"), "source": "scanner"})
+            else:
+                # Try SSH filesystem
+                fs = None
+                try:
+                    if film.library_id:
+                        src_result = await session.execute(
+                            select(LibrarySource).where(LibrarySource.library_id == film.library_id)
+                        )
+                        sources = src_result.scalars().all()
+                        for source in sources:
+                            remote_path = (source.ssh_remote_path or source.path or "").rstrip("/")
+                            if source.source_type == "ssh" and film.path.rstrip("/").startswith(remote_path):
+                                fs = SSHFilesystem(
+                                    host=source.ssh_host,
+                                    port=source.ssh_port or 22,
+                                    username=source.ssh_username or "root",
+                                    password=decrypt(source.ssh_password) if source.ssh_auth_type == "password" else None,
+                                    private_key_path=source.ssh_private_key_path if source.ssh_auth_type == "key" else None,
+                                )
+                                await fs.connect()
+                                break
+                            elif source.source_type == "local" and film.path.rstrip("/").startswith((source.path or "").rstrip("/")):
+                                # Local source but path isn't accessible — skip
+                                break
+                    
+                    if fs and isinstance(fs, SSHFilesystem):
+                        try:
+                            entries = await fs.listdir(film.path)
+                            for name in entries:
+                                ext = Path(name).suffix.lower()
+                                if ext in SUBTITLE_EXTENSIONS:
+                                    full_path = f"{film.path.rstrip('/')}/{name}"
+                                    if not await fs.is_file(full_path):
+                                        continue
+                                    info = parse_subtitle_filename(name)
+                                    key = name
+                                    if key not in seen:
+                                        seen.add(key)
+                                        # Cache the subtitle locally for later use
+                                        from app.services.workdir import extracted_subs_dir
+                                        cache_dir = extracted_subs_dir(film_id)
+                                        os.makedirs(cache_dir, exist_ok=True)
+                                        local_path = os.path.join(cache_dir, name)
+                                        if not os.path.isfile(local_path):
+                                            content = await fs.read_text(full_path)
+                                            if content:
+                                                with open(local_path, "w", encoding="utf-8") as f:
+                                                    f.write(content)
+                                        results.append({"path": local_path, "filename": name, "language": info.get("language"), "source": "ssh_cache"})
+                        finally:
+                            await fs.disconnect()
+                except Exception as e:
+                    logger.warning("Failed to list SSH subtitles", film_id=film_id, error=str(e))
         except Exception:
             pass
 
-    # 2. From work dirs (uploads, extracted, transcribed)
+    # 2. From work dirs (uploads, extracted, transcribed) — always local
     for sub_dir, source_tag in [
         (uploads_dir(film_id), "uploaded"),
         (extracted_subs_dir(film_id), "extracted"),
@@ -490,7 +596,7 @@ async def _list_film_subtitles_raw(film_id: str, session) -> list[dict]:
                         if not os.path.isfile(full_path):
                             continue
                         info = parse_subtitle_filename(name)
-                        key = (name, full_path)
+                        key = name
                         if key not in seen:
                             seen.add(key)
                             results.append({"path": full_path, "filename": name, "language": info.get("language"), "source": source_tag})
@@ -510,76 +616,24 @@ async def list_film_subtitles(
     - Scanned from the film's directory (local or cached from SSH)
     - Previously uploaded, extracted, or transcribed
     """
-    from app.services.scanner_service import parse_subtitle_filename, is_gendered_language, SUBTITLE_EXTENSIONS
-    from app.services.workdir import migrate_legacy_dirs, uploads_dir, extracted_subs_dir, whisper_dir
+    from app.services.scanner_service import parse_subtitle_filename, is_gendered_language
 
-    # Ensure legacy files are migrated to new work dir structure
-    migrate_legacy_dirs(film_id)
-
-    film = await session.get(Film, film_id)
-    if not film:
-        raise HTTPException(404, "Film not found")
+    raw = await _list_film_subtitles_raw(film_id, session)
 
     results = []
-    seen = set()
-
-    # 1. Subtitles from the film's directory (scanned)
-    if film.path and os.path.isdir(film.path):
-        try:
-            for name in sorted(os.listdir(film.path)):
-                ext = Path(name).suffix.lower()
-                if ext in SUBTITLE_EXTENSIONS:
-                    full_path = os.path.join(film.path, name)
-                    if not os.path.isfile(full_path):
-                        continue
-                    info = parse_subtitle_filename(name)
-                    key = (name, full_path)
-                    if key not in seen:
-                        seen.add(key)
-                        results.append(ExistingSubtitleOut(
-                            filename=name,
-                            path=full_path,
-                            language=info.get("language"),
-                            is_sdh=info.get("is_sdh", False),
-                            is_forced=info.get("is_forced", False),
-                            is_gendered=is_gendered_language(info.get("language") or "und"),
-                            format=ext.lstrip("."),
-                            source="scanner",
-                        ))
-        except Exception:
-            logger.warning("Cannot list subtitles from film directory", path=film.path)
-
-    # 3. Previously uploaded subtitles (in work dir)
-
-    for sub_dir, source_tag in [
-        (uploads_dir(film_id), "uploaded"),
-        (extracted_subs_dir(film_id), "extracted"),
-        (whisper_dir(film_id), "transcribed"),
-    ]:
-        if os.path.isdir(sub_dir):
-            try:
-                for name in sorted(os.listdir(sub_dir)):
-                    ext = Path(name).suffix.lower()
-                    if ext in SUBTITLE_EXTENSIONS:
-                        full_path = os.path.join(sub_dir, name)
-                        if not os.path.isfile(full_path):
-                            continue
-                        info = parse_subtitle_filename(name)
-                        key = (name, full_path)
-                        if key not in seen:
-                            seen.add(key)
-                            results.append(ExistingSubtitleOut(
-                                filename=name,
-                                path=full_path,
-                                language=info.get("language"),
-                                is_sdh=info.get("is_sdh", False),
-                                is_forced=info.get("is_forced", False),
-                                is_gendered=is_gendered_language(info.get("language") or "und"),
-                                format=ext.lstrip("."),
-                                source=source_tag,
-                            ))
-            except PermissionError:
-                pass
+    for sub in raw:
+        info = parse_subtitle_filename(sub["filename"])
+        ext = Path(sub["filename"]).suffix.lstrip(".")
+        results.append(ExistingSubtitleOut(
+            filename=sub["filename"],
+            path=sub["path"],
+            language=sub.get("language") or info.get("language"),
+            is_sdh=info.get("is_sdh", False),
+            is_forced=info.get("is_forced", False),
+            is_gendered=is_gendered_language(info.get("language") or "und"),
+            format=ext,
+            source=sub.get("source", "scanner"),
+        ))
 
     return results
 
@@ -706,13 +760,16 @@ async def transcribe_film(
     if not film.video_path:
         raise HTTPException(400, "No video file found for this film. Run a library scan first.")
 
+    # Ensure video is accessible locally (download from SSH if needed)
+    video_path = await _ensure_local_video(film, session)
+
     from app.core.database import async_session
 
     async def _run_transcription():
         from app.services.whisper_service import transcribe_video
         try:
             result = await transcribe_video(
-                video_path=film.video_path,
+                video_path=video_path,
                 film_id=film_id,
                 language=language,
                 model_size=model_size,
@@ -743,13 +800,16 @@ async def sync_subtitles(
     if not film.video_path:
         raise HTTPException(400, "No video file found for this film.")
 
+    # Ensure video is accessible locally (download from SSH if needed)
+    video_path = await _ensure_local_video(film, session)
+
     from app.core.database import async_session
 
     async def _run_sync():
         from app.services.whisper_service import sync_with_whisper
         try:
             result = await sync_with_whisper(
-                video_path=film.video_path,
+                video_path=video_path,
                 subtitle_path=subtitle_path,
                 film_id=film_id,
                 model_size=model_size,
@@ -782,14 +842,14 @@ async def get_film_tracks(
     if not film.video_path:
         raise HTTPException(400, "No video file registered for this film. Run a library scan first.")
 
-    if not os.path.isfile(film.video_path):
-        raise HTTPException(400, f"Video file not found on disk: {film.video_path}")
-
     if not check_ffmpeg_available():
         raise HTTPException(501, "ffmpeg/ffprobe not installed on the server. Install both to use track discovery.")
 
+    # Ensure video is accessible locally (download from SSH if needed)
+    video_path = await _ensure_local_video(film, session)
+
     try:
-        tracks = probe_tracks(film.video_path)
+        tracks = probe_tracks(video_path)
     except Exception as e:
         raise HTTPException(500, f"Failed to probe video: {str(e)[:200]}")
 
@@ -826,17 +886,17 @@ async def extract_film_subtitles(
     if not film.video_path:
         raise HTTPException(400, "No video file registered for this film.")
 
-    if not os.path.isfile(film.video_path):
-        raise HTTPException(400, f"Video file not found: {film.video_path}")
-
     if not check_ffmpeg_available():
         raise HTTPException(501, "ffmpeg/ffprobe not installed on the server.")
+
+    # Ensure video is accessible locally (download from SSH if needed)
+    video_path = await _ensure_local_video(film, session)
 
     try:
         if track_index is not None:
             # Extract a single track
             path = extract_subtitle_track(
-                video_path=film.video_path,
+                video_path=video_path,
                 track_index=track_index,
                 film_id=film_id,
             )
@@ -848,7 +908,7 @@ async def extract_film_subtitles(
         else:
             # Extract all text-based tracks
             results = extract_all_subtitles(
-                video_path=film.video_path,
+                video_path=video_path,
                 film_id=film_id,
                 text_only=True,
             )
@@ -890,15 +950,15 @@ async def extract_film_audio(
     if not film.video_path:
         raise HTTPException(400, "No video file registered for this film.")
 
-    if not os.path.isfile(film.video_path):
-        raise HTTPException(400, f"Video file not found: {film.video_path}")
-
     if not check_ffmpeg_available():
         raise HTTPException(501, "ffmpeg/ffprobe not installed on the server.")
 
+    # Ensure video is accessible locally (download from SSH if needed)
+    video_path = await _ensure_local_video(film, session)
+
     try:
         path = extract_audio_track(
-            video_path=film.video_path,
+            video_path=video_path,
             film_id=film_id,
             track_index=track_index,
             language=language,

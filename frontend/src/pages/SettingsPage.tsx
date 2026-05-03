@@ -1,7 +1,35 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api/client';
 import type { Setting } from '../types/settings';
-import { Save, CheckCircle2, Wifi, WifiOff, RefreshCw, Cpu, Box } from 'lucide-react';
+import { Save, CheckCircle2, Wifi, WifiOff, RefreshCw, Cpu, Box, X } from 'lucide-react';
+
+// ─── Toast system (simplified) ──────────────────────────────────────────
+type ToastType = 'success' | 'error' | 'info';
+interface ToastMsg { id: number; type: ToastType; message: string; }
+let _tid = 0;
+const _tls = new Set<(t: ToastMsg[]) => void>();
+let _ts: ToastMsg[] = [];
+function _push(type: ToastType, message: string) {
+  const id = ++_tid;
+  _ts = [..._ts, { id, type, message }];
+  _tls.forEach(l => l([..._ts]));
+  setTimeout(() => { _ts = _ts.filter(x => x.id !== id); _tls.forEach(l => l([..._ts])); }, 4000);
+}
+function _useToasts() {
+  const [t, setT] = useState<ToastMsg[]>(_ts);
+  useEffect(() => { _tls.add(setT); return () => { _tls.delete(setT); }; }, []);
+  return t;
+}
+const toast = { success: (m: string) => _push('success', m), error: (m: string) => _push('error', m), info: (m: string) => _push('info', m) };
+function _ToastBar() {
+  const toasts = _useToasts();
+  if (!toasts.length) return null;
+  return <div className="fixed top-4 right-4 z-[100] space-y-2 max-w-sm">{toasts.map(t => (
+    <div key={t.id} className={`flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium ${t.type === 'error' ? 'bg-red-500/90 text-white' : t.type === 'success' ? 'bg-emerald-500/90 text-white' : 'bg-brand-500/90 text-white'}`}>
+      <span className="flex-1">{t.message}</span>
+      <button onClick={() => { _ts = _ts.filter(x => x.id !== t.id); _tls.forEach(l => l([..._ts])); }} className="opacity-70 hover:opacity-100"><X className="w-3.5 h-3.5" /></button>
+    </div>))}</div>;
+}
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState<Setting[]>([]);
@@ -29,7 +57,7 @@ export default function SettingsPage() {
       setForm(map);
       if (map.ollama_base_url) fetchModels(map.ollama_base_url);
     } catch (e: any) {
-      alert('Erreur: ' + e.message);
+      toast.error('Erreur : ' + e.message);
     } finally {
       setLoading(false);
     }
@@ -56,7 +84,7 @@ export default function SettingsPage() {
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (e: any) {
-      alert('Sauvegarde erreur: ' + e.message);
+      toast.error('Sauvegarde : ' + e.message);
     } finally {
       setSaving(false);
     }
@@ -158,6 +186,7 @@ export default function SettingsPage() {
 
   return (
     <div className="animate-fade-in">
+      <_ToastBar />
       {/* Header + Save */}
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-8">
         <div>

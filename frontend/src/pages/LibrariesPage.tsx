@@ -5,6 +5,57 @@ import {
   CheckCircle2, AlertCircle, Film, Clock,
 } from 'lucide-react';
 
+// ─── Toast / Confirm system (shared with FilmDetailPage) ────────────────
+
+type ToastType = 'success' | 'error' | 'info';
+interface ToastMsg { id: number; type: ToastType; message: string; }
+let _toastId = 0;
+const _toastListeners = new Set<(t: ToastMsg[]) => void>();
+let _toasts: ToastMsg[] = [];
+function pushToast(type: ToastType, message: string) {
+  const id = ++_toastId;
+  _toasts = [..._toasts, { id, type, message }];
+  _toastListeners.forEach(l => l([..._toasts]));
+  setTimeout(() => { _toasts = _toasts.filter(t => t.id !== id); _toastListeners.forEach(l => l([..._toasts])); }, 4000);
+}
+let _resolveConfirm: ((v: boolean) => void) | null = null;
+const _confirmListeners = new Set<(s: { open: boolean; message: string }) => void>();
+let _confirmState = { open: false, message: '' };
+function showConfirm(msg: string): Promise<boolean> {
+  return new Promise(resolve => { _resolveConfirm = resolve; _confirmState = { open: true, message: msg }; _confirmListeners.forEach(l => l({ ..._confirmState })); });
+}
+function useToasts() {
+  const [t, setT] = useState<ToastMsg[]>(_toasts);
+  useEffect(() => { _toastListeners.add(setT); return () => { _toastListeners.delete(setT); }; }, []);
+  return t;
+}
+function useConfirm() {
+  const [s, setS] = useState(_confirmState);
+  useEffect(() => { _confirmListeners.add(setS); return () => { _confirmListeners.delete(setS); }; }, []);
+  return { ...s, yes: () => { _confirmState = { open: false, message: '' }; _confirmListeners.forEach(l => l({ ..._confirmState })); _resolveConfirm?.(true); _resolveConfirm = null; }, no: () => { _confirmState = { open: false, message: '' }; _confirmListeners.forEach(l => l({ ..._confirmState })); _resolveConfirm?.(false); _resolveConfirm = null; } };
+}
+const toast = { success: (m: string) => pushToast('success', m), error: (m: string) => pushToast('error', m), info: (m: string) => pushToast('info', m) };
+const confirm = showConfirm;
+
+// ─── Toast/Confirm renderers ──────────────────────────────────────────
+function ToastBar() {
+  const toasts = useToasts();
+  if (!toasts.length) return null;
+  return <div className="fixed top-4 right-4 z-[100] space-y-2 max-w-sm">{toasts.map(t => (
+    <div key={t.id} className={`flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium ${t.type === 'error' ? 'bg-red-500/90 text-white' : t.type === 'success' ? 'bg-emerald-500/90 text-white' : 'bg-brand-500/90 text-white'}`}>
+      <span className="flex-1">{t.message}</span>
+      <button onClick={() => { _toasts = _toasts.filter(x => x.id !== t.id); _toastListeners.forEach(l => l([..._toasts])); }} className="opacity-70 hover:opacity-100"><X className="w-3.5 h-3.5" /></button>
+    </div>))}</div>;
+}
+function ConfirmDlg() {
+  const { open, message, yes, no } = useConfirm();
+  if (!open) return null;
+  return <div className="fixed inset-0 z-[99] flex items-center justify-center bg-black/60"><div className="bg-gray-800 rounded-xl p-6 max-w-md w-full mx-4 shadow-2xl border border-white/10">
+    <p className="text-white text-sm mb-6 whitespace-pre-line">{message}</p>
+    <div className="flex gap-3 justify-end"><button onClick={no} className="px-4 py-2 text-sm rounded-lg bg-gray-700 text-gray-300 hover:bg-gray-600 transition">Annuler</button><button onClick={yes} className="px-4 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600 transition">Confirmer</button></div>
+  </div></div>;
+}
+
 // ─── Types ─────────────────────────────────────────────────────────────
 
 interface LibrarySource {
@@ -101,26 +152,26 @@ export default function LibrariesPage() {
   }, [progressMap, loadLibraries]);
 
   async function handleCreate(name: string, description?: string) {
-    try { await api_POST('/libraries/', { name, description }); await loadLibraries(); setShowCreate(false); }
-    catch (e: any) { alert('Erreur : ' + e.message); }
+    try { await api_POST('/libraries/', { name, description }); await loadLibraries(); setShowCreate(false); toast.success('Bibliothèque créée'); }
+    catch (e: any) { toast.error('Erreur : ' + e.message); }
   }
   async function handleDelete(id: string) {
-    if (!confirm('Supprimer cette bibliothèque et tous les films qu\'elle contient ?')) return;
-    try { await api_DELETE(`/libraries/${id}?delete_films=true`); await loadLibraries(); if (expandedLib === id) setExpandedLib(null); }
-    catch (e: any) { alert('Erreur : ' + e.message); }
+    if (!await confirm('Supprimer cette bibliothèque et tous les films qu\'elle contient ?')) return;
+    try { await api_DELETE(`/libraries/${id}?delete_films=true`); await loadLibraries(); if (expandedLib === id) setExpandedLib(null); toast.success('Bibliothèque supprimée'); }
+    catch (e: any) { toast.error('Erreur : ' + e.message); }
   }
   async function handleAddSource(libraryId: string, data: any) {
-    try { await api_POST(`/libraries/${libraryId}/sources`, data); await loadLibraries(); setShowAddSource(null); }
-    catch (e: any) { alert('Erreur : ' + e.message); }
+    try { await api_POST(`/libraries/${libraryId}/sources`, data); await loadLibraries(); setShowAddSource(null); toast.success('Source ajoutée'); }
+    catch (e: any) { toast.error('Erreur : ' + e.message); }
   }
   async function handleDeleteSource(libraryId: string, sourceId: string) {
-    if (!confirm('Supprimer cette source et les films qu\'elle contient ?')) return;
-    try { await api_DELETE(`/libraries/${libraryId}/sources/${sourceId}?delete_films=true`); await loadLibraries(); }
-    catch (e: any) { alert('Erreur : ' + e.message); }
+    if (!await confirm('Supprimer cette source et les films qu\'elle contient ?')) return;
+    try { await api_DELETE(`/libraries/${libraryId}/sources/${sourceId}?delete_films=true`); await loadLibraries(); toast.success('Source supprimée'); }
+    catch (e: any) { toast.error('Erreur : ' + e.message); }
   }
   async function handleScan(libraryId: string) {
-    try { await api_POST(`/libraries/${libraryId}/scan`); }
-    catch (e: any) { alert('Erreur : ' + e.message); }
+    try { await api_POST(`/libraries/${libraryId}/scan`); toast.info('Scan lancé'); }
+    catch (e: any) { toast.error('Erreur : ' + e.message); }
   }
 
   if (loading && libraries.length === 0) return (
@@ -130,6 +181,8 @@ export default function LibrariesPage() {
 
   return (
     <div className="animate-fade-in">
+      <ToastBar />
+      <ConfirmDlg />
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-8">
         <div>
           <h1 className="text-3xl font-bold text-gray-100 tracking-tight">Bibliothèques</h1>

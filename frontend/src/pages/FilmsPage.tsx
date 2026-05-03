@@ -1,10 +1,18 @@
 import { useState } from 'react';
-import { Plus, Search, Film as FilmIcon } from 'lucide-react';
+import { Plus, Search, Film as FilmIcon, X } from 'lucide-react';
 import { useFilms } from '../hooks/useApi';
 import { api } from '../api/client';
 import type { FilmCreate } from '../types';
 import FilmCard from '../components/FilmCard';
 import CreateFilmModal from '../components/CreateFilmModal';
+
+// Simple toast for FilmsPage
+let _tid = 0;
+const _tls = new Set<(t: { id: number; type: string; message: string }[]) => void>();
+let _ts: { id: number; type: string; message: string }[] = [];
+function _push(type: string, message: string) { const id = ++_tid; _ts = [..._ts, { id, type, message }]; _tls.forEach(l => l([..._ts])); setTimeout(() => { _ts = _ts.filter(x => x.id !== id); _tls.forEach(l => l([..._ts])); }, 4000); }
+function _useToasts() { const [t, setT] = useState(_ts); useState(() => { _tls.add(setT); return () => { _tls.delete(setT); }; }); return t; }
+const toast = { success: (m: string) => _push('success', m), error: (m: string) => _push('error', m), info: (m: string) => _push('info', m) };
 
 export default function FilmsPage() {
   const { data: films, loading, error, refresh } = useFilms();
@@ -19,7 +27,7 @@ export default function FilmsPage() {
       setModalOpen(false);
       refresh();
     } catch (e: any) {
-      alert('Erreur: ' + e.message);
+      toast.error('Erreur : ' + e.message);
     } finally {
       setCreating(false);
     }

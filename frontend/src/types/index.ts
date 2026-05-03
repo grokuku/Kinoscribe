@@ -40,6 +40,7 @@ export interface ExistingSubtitle {
 }
 
 export interface Character {
+  id?: string;
   name: string;
   gender: 'male' | 'female' | 'neutral' | 'unknown';
   description: string | null;
@@ -85,6 +86,7 @@ export interface Task {
   source_filename: string;
   source_format: string;
   target_filename: string | null;
+  target_path: string | null;
   progress_pct: number;
   error_message: string | null;
   created_at: string | null;
@@ -100,6 +102,7 @@ export interface TaskProgress {
 // ─── Glossary ─────────────────────────────────────────────────
 
 export interface GlossaryEntry {
+  id?: string;
   source_term: string;
   target_term: string;
   notes: string | null;

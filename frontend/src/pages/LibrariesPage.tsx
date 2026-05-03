@@ -61,7 +61,7 @@ function ConfirmDlg() {
 interface LibrarySource {
   id: string;
   library_id: string;
-  source_type: 'local' | 'ssh';
+  source_type: 'local' | 'ssh' | 'smb' | 'cifs';
   path: string;
   ssh_host: string | null;
   ssh_port: number | null;
@@ -75,6 +75,9 @@ interface LibrarySource {
   last_scan_at: string | null;
   scan_status: 'idle' | 'scanning' | 'error';
   scan_error: string | null;
+  mount_status: 'unmounted' | 'mounted' | 'error' | 'unsupported';
+  mount_point: string | null;
+  mount_error: string | null;
 }
 
 interface Library {
@@ -104,7 +107,8 @@ interface ScanProgressData {
 
 const SOURCE_TYPES = [
   { value: 'local', label: 'Dossier local', icon: HardDrive, desc: 'Répertoire sur le serveur local' },
-  { value: 'ssh', label: 'SSH distant', icon: Wifi, desc: 'Serveur distant via SSH/SFTP' },
+  { value: 'ssh', label: 'SSH distant', icon: Wifi, desc: 'Serveur distant via SSH/SFTP — montage automatique via sshfs' },
+  { value: 'smb', label: 'SMB/CIFS', icon: HardDrive, desc: 'Partage Windows / NAS — montage automatique via cifs-utils' },
 ] as const;
 
 // ─── API helpers ────────────────────────────────────────────────────────
@@ -165,9 +169,30 @@ export default function LibrariesPage() {
     catch (e: any) { toast.error('Erreur : ' + e.message); }
   }
   async function handleDeleteSource(libraryId: string, sourceId: string) {
+    // Unmount first if mounted
+    const source = libraries.flatMap(l => l.sources).find(s => s.id === sourceId);
+    if (source && source.mount_status === 'mounted') {
+      try { await api_POST(`/libraries/${libraryId}/sources/${sourceId}/unmount`); } catch { /* ignore */ }
+    }
     if (!await confirm('Supprimer cette source et les films qu\'elle contient ?')) return;
     try { await api_DELETE(`/libraries/${libraryId}/sources/${sourceId}?delete_films=true`); await loadLibraries(); toast.success('Source supprimée'); }
     catch (e: any) { toast.error('Erreur : ' + e.message); }
+  }
+  async function handleMountSource(libraryId: string, sourceId: string) {
+    try {
+      const result = await api_POST(`/libraries/${libraryId}/sources/${sourceId}/mount`);
+      if (result.mounted) { toast.success('Source montée avec succès'); }
+      else { toast.error('Échec du montage : ' + (result.error || 'Erreur inconnue')); }
+      await loadLibraries();
+    } catch (e: any) { toast.error('Erreur de montage : ' + e.message); }
+  }
+  async function handleUnmountSource(libraryId: string, sourceId: string) {
+    try {
+      const result = await api_POST(`/libraries/${libraryId}/sources/${sourceId}/unmount`);
+      if (result.unmounted) { toast.success('Source démontée'); }
+      else { toast.error('Échec du démontage : ' + (result.error || 'Erreur inconnue')); }
+      await loadLibraries();
+    } catch (e: any) { toast.error('Erreur de démontage : ' + e.message); }
   }
   async function handleScan(libraryId: string) {
     try { await api_POST(`/libraries/${libraryId}/scan`); toast.info('Scan lancé'); }
@@ -262,7 +287,7 @@ export default function LibrariesPage() {
                     <p className="text-sm text-gray-600 text-center py-4">Aucun dossier source — ajoutez-en un ci-dessous</p>
                   )}
                   {lib.sources.map((source) => (
-                    <SourceRow key={source.id} source={source} onDelete={() => handleDeleteSource(lib.id, source.id)} />
+                    <SourceRow key={source.id} source={source} onDelete={() => handleDeleteSource(lib.id, source.id)} onMount={() => handleMountSource(lib.id, source.id)} onUnmount={() => handleUnmountSource(lib.id, source.id)} />
                   ))}
 
                   {showAddSource === lib.id ? (
@@ -291,35 +316,66 @@ export default function LibrariesPage() {
 
 // ─── Source Row ──────────────────────────────────────────────────────────
 
-function SourceRow({ source, onDelete }: { source: LibrarySource; onDelete: () => void }) {
+function SourceRow({ source, onDelete, onMount, onUnmount }: { source: LibrarySource; onDelete: () => void; onMount: () => void; onUnmount: () => void }) {
   const Icon = source.source_type === 'ssh' ? Wifi : HardDrive;
   const isErr = source.scan_status === 'error';
+  const isMounted = source.mount_status === 'mounted';
+  const isMountError = source.mount_status === 'error';
+  const canMount = source.source_type !== 'local';
   const displayPath = source.source_type === 'ssh'
     ? `${source.ssh_username || 'user'}@${source.ssh_host}:${source.ssh_remote_path || source.path}`
+    : source.source_type === 'smb' || source.source_type === 'cifs'
+    ? source.path
     : source.path;
 
   return (
-    <div className={`flex items-start gap-3 p-3 rounded-xl bg-white/[0.02] border ${isErr ? 'border-red-500/20' : 'border-white/[0.04]'}`}>
-      <div className={`flex-shrink-0 flex items-center justify-center w-9 h-9 rounded-lg ${source.source_type === 'ssh' ? 'bg-violet-500/15' : 'bg-emerald-500/15'}`}>
-        <Icon className={`w-4 h-4 ${source.source_type === 'ssh' ? 'text-violet-400' : 'text-emerald-400'}`} />
-      </div>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-gray-200 truncate">{displayPath}</span>
-          {source.ssh_port && source.ssh_port !== 22 && <span className="text-xs text-gray-500">:{source.ssh_port}</span>}
-          {source.ssh_auth_type && <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-400">{source.ssh_auth_type === 'key' ? '🔑 Clé' : '🔒 MDP'}</span>}
+    <div className={`flex flex-col gap-2 p-3 rounded-xl bg-white/[0.02] border ${isErr ? 'border-red-500/20' : 'border-white/[0.04]'}`}>
+      <div className="flex items-start gap-3">
+        <div className={`flex-shrink-0 flex items-center justify-center w-9 h-9 rounded-lg ${source.source_type === 'ssh' ? 'bg-violet-500/15' : source.source_type === 'smb' || source.source_type === 'cifs' ? 'bg-blue-500/15' : 'bg-emerald-500/15'}`}>
+          <Icon className={`w-4 h-4 ${source.source_type === 'ssh' ? 'text-violet-400' : source.source_type === 'smb' || source.source_type === 'cifs' ? 'text-blue-400' : 'text-emerald-400'}`} />
         </div>
-        <div className="flex items-center gap-2 mt-1">
-          <span className="text-[10px] font-medium uppercase tracking-wider text-gray-600">{source.source_type}</span>
-          {!source.enabled && <span className="text-[10px] text-yellow-500 uppercase">Désactivé</span>}
-          {source.scan_status === 'scanning' && <span className="text-[10px] text-brand-400">Scan…</span>}
-          {isErr && <span className="text-[10px] text-red-400">⚠️ {source.scan_error?.slice(0, 60)}</span>}
-          {source.last_scan_at && source.scan_status === 'idle' && !isErr && (
-            <span className="text-[10px] text-gray-600">{new Date(source.last_scan_at).toLocaleString('fr-FR')}</span>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-gray-200 truncate">{displayPath}</span>
+            {source.ssh_port && source.ssh_port !== 22 && source.source_type === 'ssh' && <span className="text-xs text-gray-500">:{source.ssh_port}</span>}
+            {source.ssh_auth_type && <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-400">{source.ssh_auth_type === 'key' ? '🔑 Clé' : '🔒 MDP'}</span>}
+          </div>
+          <div className="flex items-center gap-2 mt-1 flex-wrap">
+            <span className="text-[10px] font-medium uppercase tracking-wider text-gray-600">{source.source_type}</span>
+            {!source.enabled && <span className="text-[10px] text-yellow-500 uppercase">Désactivé</span>}
+            {source.scan_status === 'scanning' && <span className="text-[10px] text-brand-400">Scan…</span>}
+            {isErr && <span className="text-[10px] text-red-400">⚠️ {source.scan_error?.slice(0, 60)}</span>}
+            {source.last_scan_at && source.scan_status === 'idle' && !isErr && (
+              <span className="text-[10px] text-gray-600">{new Date(source.last_scan_at).toLocaleString('fr-FR')}</span>
+            )}
+          </div>
+        </div>
+        <button onClick={onDelete} className="btn-ghost text-gray-600 hover:text-red-400 !p-1.5 flex-shrink-0" title="Supprimer"><X className="w-4 h-4" /></button>
+      </div>
+      {/* Mount status row */}
+      {canMount && (
+        <div className="flex items-center gap-2 pl-12">
+          {isMounted ? (
+            <>
+              <span className="text-[10px] font-medium text-emerald-400 flex items-center gap-1">
+                <CheckCircle2 className="w-3 h-3" /> Monté
+              </span>
+              {source.mount_point && <span className="text-[10px] text-gray-600 font-mono truncate max-w-[200px]" title={source.mount_point}>{source.mount_point}</span>}
+              <button onClick={onUnmount} className="text-[10px] text-gray-500 hover:text-red-400 ml-1" title="Démonter">Démonter</button>
+            </>
+          ) : isMountError ? (
+            <>
+              <span className="text-[10px] font-medium text-red-400">⚠️ Erreur : {source.mount_error?.slice(0, 80)}</span>
+              <button onClick={onMount} className="text-[10px] text-brand-400 hover:text-brand-300 ml-1">Réessayer</button>
+            </>
+          ) : (
+            <>
+              <span className="text-[10px] text-gray-500">Non monté</span>
+              <button onClick={onMount} className="text-[10px] text-brand-400 hover:text-brand-300 ml-1">Monter</button>
+            </>
           )}
         </div>
-      </div>
-      <button onClick={onDelete} className="btn-ghost text-gray-600 hover:text-red-400 !p-1.5 flex-shrink-0" title="Supprimer"><X className="w-4 h-4" /></button>
+      )}
     </div>
   );
 }
@@ -327,7 +383,7 @@ function SourceRow({ source, onDelete }: { source: LibrarySource; onDelete: () =
 // ─── Add Source Form ──────────────────────────────────────────────────────
 
 function AddSourceForm({ libraryId, onSubmit, onCancel }: { libraryId: string; onSubmit: (data: any) => void; onCancel: () => void }) {
-  const [sourceType, setSourceType] = useState<'local' | 'ssh'>('local');
+  const [sourceType, setSourceType] = useState<'local' | 'ssh' | 'smb'>('local');
   const [path, setPath] = useState('');
   const [sshHost, setSshHost] = useState('');
   const [sshPort, setSshPort] = useState(22);
@@ -340,7 +396,7 @@ function AddSourceForm({ libraryId, onSubmit, onCancel }: { libraryId: string; o
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ connected: boolean; error?: string; entries?: string[]; path_exists?: boolean; path_is_dir?: boolean; total_entries?: number } | null>(null);
 
-  const canSubmit = sourceType === 'local' ? path.trim() : sshHost.trim() && sshRemotePath.trim();
+  const canSubmit = sourceType === 'local' ? path.trim() : sourceType === 'smb' ? path.trim() : sshHost.trim() && sshRemotePath.trim();
 
   async function handleTestSsh() {
     setTesting(true); setTestResult(null);
@@ -356,11 +412,15 @@ function AddSourceForm({ libraryId, onSubmit, onCancel }: { libraryId: string; o
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault(); if (!canSubmit) return;
-    const data: any = { source_type: sourceType, path: sourceType === 'local' ? path.trim() : `ssh://${sshUsername || 'root'}@${sshHost}:${sshPort}${sshRemotePath}`, scan_depth: 2 };
+    const data: any = { source_type: sourceType, path: sourceType === 'local' ? path.trim() : sourceType === 'smb' ? path.trim() : `ssh://${sshUsername || 'root'}@${sshHost}:${sshPort}${sshRemotePath}`, scan_depth: 2 };
     if (sourceType === 'ssh') {
       data.ssh_host = sshHost; data.ssh_port = sshPort; data.ssh_username = sshUsername || 'root';
       data.ssh_auth_type = sshAuthType; data.ssh_private_key_path = sshAuthType === 'key' ? sshPrivateKeyPath : null;
       data.ssh_password = sshAuthType === 'password' ? sshPassword : null; data.ssh_remote_path = sshRemotePath;
+    } else if (sourceType === 'smb') {
+      data.ssh_username = sshUsername || 'guest';
+      data.ssh_password = sshPassword || null;
+      // For SMB, 'path' is the UNC path (e.g. //192.168.1.100/Films)
     }
     onSubmit(data);
   }
@@ -439,6 +499,30 @@ function AddSourceForm({ libraryId, onSubmit, onCancel }: { libraryId: string; o
           </div>
         </div>
       )}
+
+      {sourceType === 'smb' && (
+        <div className="space-y-3">
+          <div className="p-3 rounded-lg bg-blue-500/5 border border-blue-500/10">
+            <p className="text-xs text-blue-300/80 flex items-center gap-1.5"><HardDrive className="w-3.5 h-3.5" />Partage SMB/CIFS — monté automatiquement dans le conteneur Docker</p>
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Chemin UNC *</label>
+            <input type="text" value={path} onChange={(e) => setPath(e.target.value)} placeholder="//192.168.1.100/Films" className="input-field font-mono text-sm" />
+            <p className="text-xs text-gray-600 mt-1">Format : //serveur/partage (ex: //nas.local/Films)</p>
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Sous-dossier <span className="text-gray-600">(optionnel)</span></label>
+            <input type="text" value={sshRemotePath} onChange={(e) => setSshRemotePath(e.target.value)} placeholder="/Films" className="input-field font-mono text-sm" />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div><label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Utilisateur</label><input type="text" value={sshUsername} onChange={(e) => setSshUsername(e.target.value)} placeholder="guest" className="input-field" /></div>
+            <div><label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Mot de passe</label>
+              <div className="relative"><input type={showPassword ? 'text' : 'password'} value={sshPassword} onChange={(e) => setSshPassword(e.target.value)} placeholder="Mot de passe SMB" className="input-field pr-10" />
+                <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute right-2 top-1/2 -translate-y-1/2 btn-ghost !p-1">{showPassword ? <EyeOff className="w-4 h-4 text-gray-500" /> : <Eye className="w-4 h-4 text-gray-500" />}</button></div></div>
+          </div>
+        </div>
+      )}
+
       <div className="flex justify-end gap-3 pt-2">
         <button type="button" onClick={onCancel} className="btn-secondary">Annuler</button>
         <button type="submit" disabled={!canSubmit} className="btn-primary disabled:opacity-40"><Plus className="w-4 h-4" /> Ajouter</button>

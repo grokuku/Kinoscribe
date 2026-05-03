@@ -230,3 +230,57 @@ async def test_ssh(data: dict):
         private_key_path=data.get("private_key_path"), remote_path=data.get("remote_path"),
     )
     return result
+
+
+# ─── Mount / Unmount ─────────────────────────────────────────────────────────
+
+@router.post("/{library_id}/sources/{source_id}/mount")
+async def mount_source_endpoint(library_id: str, source_id: str, session: AsyncSession = Depends(get_session)):
+    """Mount a library source (SSH/CIFS) to a local path."""
+    from app.core.config import settings as app_settings
+    if not getattr(app_settings, 'mount_enabled', True):
+        raise HTTPException(403, "Mounting is disabled. Set MOUNT_ENABLED=true to enable.")
+
+    source = await session.get(LibrarySource, source_id)
+    if not source or source.library_id != library_id:
+        raise HTTPException(404, "Source not found")
+    if source.source_type == "local":
+        raise HTTPException(400, "Local sources don't need mounting.")
+
+    from app.services.mount_service import mount_source
+    result = await mount_source(source)
+
+    # Update source status in DB
+    if result.get("mounted"):
+        source.mount_status = "mounted"
+        source.mount_point = result["mount_point"]
+        source.mount_error = None
+    else:
+        source.mount_status = "error"
+        source.mount_point = None
+        source.mount_error = result.get("error", "Unknown error")
+    await session.commit()
+
+    return result
+
+
+@router.post("/{library_id}/sources/{source_id}/unmount")
+async def unmount_source_endpoint(library_id: str, source_id: str, session: AsyncSession = Depends(get_session)):
+    """Unmount a library source."""
+    source = await session.get(LibrarySource, source_id)
+    if not source or source.library_id != library_id:
+        raise HTTPException(404, "Source not found")
+    if source.source_type == "local":
+        raise HTTPException(400, "Local sources cannot be unmounted.")
+
+    from app.services.mount_service import unmount_source
+    result = await unmount_source(source)
+
+    # Update source status
+    if result.get("unmounted", False):
+        source.mount_status = "unmounted"
+        source.mount_point = None
+        source.mount_error = None
+    await session.commit()
+
+    return result

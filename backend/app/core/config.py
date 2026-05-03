@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     # ─── TMDB ──────────────────────────────────────────
     tmdb_api_key: str = ""
 
+    # ─── Mount (SSHFS/CIFS) ──────────────────────────────
+    mount_base_dir: str = ""  # empty = auto (data/mounts)
+    mount_enabled: bool = True  # Global toggle: disable to skip all mounting
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

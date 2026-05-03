@@ -411,42 +411,89 @@ async def stream_film_video(
     if not film.video_path:
         raise HTTPException(400, "No video file registered for this film")
 
-    # Only local files are streamable
-    if not os.path.isfile(film.video_path):
-        # Check if this is an SSH film (path doesn't exist locally)
-        is_ssh = False
-        if film.library_id:
-            from app.models.database import LibrarySource
-            result = await session.execute(
-                select(LibrarySource).where(LibrarySource.library_id == film.library_id)
-            )
-            sources = result.scalars().all()
-            is_ssh = any(s.source_type == 'ssh' for s in sources)
-        if is_ssh:
-            raise HTTPException(400, "Video streaming is not available for SSH library sources. The video file is on a remote server.")
-        raise HTTPException(404, f"Video file not found on disk: {film.video_path}")
+    # Determine accessible path: check mount points first
+    accessible_path = None
+    if film.library_id:
+        from app.models.database import LibrarySource
+        from sqlalchemy import select as sa_select2
+        result2 = await session.execute(
+            sa_select2(LibrarySource).where(LibrarySource.library_id == film.library_id)
+        )
+        sources2 = result2.scalars().all()
+        for source2 in sources2:
+            mount_point = getattr(source2, 'mount_point', None)
+            if mount_point and mount_point.strip():
+                remote_path = (source2.ssh_remote_path or source2.path or "").rstrip("/")
+                if film.video_path.startswith(remote_path):
+                    accessible_path = film.video_path.replace(remote_path, mount_point.rstrip('/'), 1)
+                    break
 
-    # Determine MIME type from extension
-    ext = os.path.splitext(film.video_path)[1].lower()
+    if accessible_path and os.path.isfile(accessible_path):
+        # File accessible via mount point — stream it directly
+        ext = os.path.splitext(accessible_path)[1].lower()
+    elif accessible_path:
+        # Mount point set but file not found — fall through to error
+        is_ssh = any(s.source_type == 'ssh' for s in (sources2 if 'sources2' in dir() else []))
+        if is_ssh:
+            raise HTTPException(400, "Video file not found at mount point. Check that the mount is active.")
+        raise HTTPException(404, f"Video file not found on disk: {film.video_path}")
+    else:
+        # No mount point — check local
+        if not os.path.isfile(film.video_path):
+            is_ssh = False
+            if film.library_id:
+                from app.models.database import LibrarySource
+                result3 = await session.execute(
+                    select(LibrarySource).where(LibrarySource.library_id == film.library_id)
+                )
+                sources3 = result3.scalars().all()
+                is_ssh = any(s.source_type == 'ssh' for s in sources3)
+            if is_ssh:
+                raise HTTPException(400, "Video streaming is not available for SSH library sources. The video file is on a remote server.")
+            raise HTTPException(404, f"Video file not found on disk: {film.video_path}")
+        accessible_path = film.video_path
+
+    ext = os.path.splitext(accessible_path)[1].lower()
     mime_map = {'.mp4': 'video/mp4', '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo',
                 '.mov': 'video/quicktime', '.wmv': 'video/x-ms-wmv', '.webm': 'video/webm'}
     media_type = mime_map.get(ext, 'video/mp4')
 
     return FileResponse(
-        film.video_path,
+        accessible_path,
         media_type=media_type,
-        filename=os.path.basename(film.video_path),
+        filename=os.path.basename(accessible_path),
     )
 
 
 async def _ensure_local_video(film: Film, session) -> str:
-    """Ensure video file is accessible locally, downloading from SSH if needed.
-    Returns local path to the video file.
+    """Ensure video file is accessible locally.
+    1. If mounted (mount_point on source) → use local mount path directly
+    2. If local path exists → use it directly
+    3. If SSH → download to work dir
     """
+    # Check if the video is on a mounted source
+    if film.library_id:
+        from app.models.database import LibrarySource
+        result = await session.execute(
+            select(LibrarySource).where(LibrarySource.library_id == film.library_id)
+        )
+        sources = result.scalars().all()
+        for source in sources:
+            mount_point = getattr(source, 'mount_point', None)
+            if mount_point and mount_point.strip():
+                # The remote path is mounted locally
+                remote_path = (source.ssh_remote_path or source.path or "").rstrip("/")
+                if film.video_path and film.video_path.startswith(remote_path):
+                    # Translate remote path to local mount path
+                    local_path = film.video_path.replace(remote_path, mount_point.rstrip('/'), 1)
+                    if os.path.isfile(local_path):
+                        return local_path
+
+    # Check if local path exists
     if film.video_path and os.path.isfile(film.video_path):
         return film.video_path
 
-    # Must be SSH — download to work dir
+    # Must be SSH without mount — download to work dir
     if not film.video_path or not film.library_id:
         raise HTTPException(400, "No video file available for this film.")
 
@@ -472,7 +519,6 @@ async def _ensure_local_video(film: Film, session) -> str:
             )
             await fs.connect()
             try:
-                # Download to work dir
                 local_dir = os.path.join(work_dir(film.id), "video")
                 os.makedirs(local_dir, exist_ok=True)
                 local_path = os.path.join(local_dir, os.path.basename(film.video_path))
@@ -509,15 +555,32 @@ async def _list_film_subtitles_raw(film_id: str, session) -> list[dict]:
     results = []
     seen = set()
 
-    # 1. Subtitles from the film's directory (local or SSH)
+    # 1. Subtitles from the film's directory (local, mounted, or SSH)
     if film.path:
         try:
-            # Try local first
-            if os.path.isdir(film.path):
-                for name in sorted(os.listdir(film.path)):
+            # Check if the film's source is mounted locally
+            mount_path = None
+            if film.library_id:
+                src_result = await session.execute(
+                    select(LibrarySource).where(LibrarySource.library_id == film.library_id)
+                )
+                sources = src_result.scalars().all()
+                for source in sources:
+                    mp = getattr(source, 'mount_point', None)
+                    if mp and mp.strip():
+                        remote_path = (source.ssh_remote_path or source.path or "").rstrip("/")
+                        if film.path.rstrip("/").startswith(remote_path):
+                            mount_path = film.path.rstrip("/").replace(remote_path, mp.rstrip("/"), 1)
+                            break
+
+            # Try mount point first, then local path, then SSH fallback
+            effective_path = mount_path or film.path
+
+            if os.path.isdir(effective_path):
+                for name in sorted(os.listdir(effective_path)):
                     ext = Path(name).suffix.lower()
                     if ext in SUBTITLE_EXTENSIONS:
-                        full_path = os.path.join(film.path, name)
+                        full_path = os.path.join(effective_path, name)
                         if not os.path.isfile(full_path):
                             continue
                         info = parse_subtitle_filename(name)
@@ -525,15 +588,13 @@ async def _list_film_subtitles_raw(film_id: str, session) -> list[dict]:
                         if key not in seen:
                             seen.add(key)
                             results.append({"path": full_path, "filename": name, "language": info.get("language"), "source": "scanner"})
-            else:
-                # Try SSH filesystem
+            elif not mount_path:
+                # Try SSH filesystem only if no mount point available
+                # (mount point exists but dir not found → mount issue, don't fall through to SSH)
                 fs = None
                 try:
                     if film.library_id:
-                        src_result = await session.execute(
-                            select(LibrarySource).where(LibrarySource.library_id == film.library_id)
-                        )
-                        sources = src_result.scalars().all()
+                        # sources already queried above
                         for source in sources:
                             remote_path = (source.ssh_remote_path or source.path or "").rstrip("/")
                             if source.source_type == "ssh" and film.path.rstrip("/").startswith(remote_path):
@@ -547,9 +608,8 @@ async def _list_film_subtitles_raw(film_id: str, session) -> list[dict]:
                                 await fs.connect()
                                 break
                             elif source.source_type == "local" and film.path.rstrip("/").startswith((source.path or "").rstrip("/")):
-                                # Local source but path isn't accessible — skip
                                 break
-                    
+
                     if fs and isinstance(fs, SSHFilesystem):
                         try:
                             entries = await fs.listdir(film.path)

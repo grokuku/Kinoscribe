@@ -30,6 +30,16 @@ services:
       - DEBUG=false
       - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
       - SSH_KNOWN_HOSTS=${SSH_KNOWN_HOSTS:-none}
+      - MOUNT_ENABLED=${MOUNT_ENABLED:-true}
+      - MOUNT_BASE_DIR=${MOUNT_BASE_DIR:-}
+    # Required for sshfs/cifs mounts inside the container
+    # If you prefer not to grant SYS_ADMIN, remove cap_add and devices,
+    # then mount your media directories via Docker volumes instead.
+    # See: https://github.com/grokuku/Kinoscribe#mount-options
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse:/dev/fuse
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

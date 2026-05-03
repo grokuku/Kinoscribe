@@ -682,8 +682,18 @@ class ScannerService:
                 await session.commit()
 
                 try:
-                    if source.source_type == "local":
+                    # Determine filesystem: use mount point if source is mounted
+                    scan_path = source.ssh_remote_path or source.path
+                    effective_local_path = getattr(source, 'mount_point', None)
+
+                    if source.source_type == "local" or (effective_local_path and effective_local_path.strip()):
+                        # Local or mounted remote — use LocalFilesystem
                         fs = LocalFilesystem()
+                        # If source is mounted, use the mount point as scan path
+                        if effective_local_path and effective_local_path.strip():
+                            scan_path = effective_local_path
+                            # Also update source.path for scanner downstream
+                            logger.info("Using mount point for source", source_id=source.id, mount=effective_local_path)
                     elif source.source_type == "ssh":
                         fs = await self._connect_ssh(source, progress)
                         if fs is None:
@@ -694,9 +704,6 @@ class ScannerService:
                         source.scan_error = f"Unsupported: {source.source_type}"
                         await session.commit()
                         continue
-
-                    # --- Phase 1: Count directories (quick) ---
-                    scan_path = source.ssh_remote_path if source.source_type == "ssh" else source.path
                     if source.scan_depth > 1:
                         top_entries = await fs.listdir(scan_path)
                         subdirs = []

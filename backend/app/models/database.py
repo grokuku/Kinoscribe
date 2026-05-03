@@ -241,6 +241,12 @@ class LibrarySource(Base):
     last_scan_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     scan_status: Mapped[str] = mapped_column(String, default="idle")  # 'idle' | 'scanning' | 'error'
     scan_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # ── Mount (SSHFS/CIFS) ──
+    mount_status: Mapped[str] = mapped_column(String, default="unmounted")  # 'unmounted' | 'mounted' | 'error' | 'unsupported'
+    mount_point: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # local path when mounted, e.g. /app/data/mounts/{id}
+    mount_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 

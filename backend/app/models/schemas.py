@@ -148,8 +148,8 @@ class SettingsUpdate(BaseModel):
 # ─── Libraries & Sources ──────────────────────────────────────────────────────
 
 class LibrarySourceCreate(BaseModel):
-    source_type: str = "local"  # 'local' | 'ssh'
-    path: str  # For local: absolute path. For SSH: display name / identifier
+    source_type: str = "local"  # 'local' | 'ssh' | 'smb' | 'cifs'
+    path: str  # For local: absolute path. For SSH: display name / identifier. For SMB: //server/share
     ssh_host: Optional[str] = None
     ssh_port: int = 22
     ssh_username: Optional[str] = None
@@ -159,6 +159,7 @@ class LibrarySourceCreate(BaseModel):
     ssh_remote_path: Optional[str] = None
     enabled: bool = True
     scan_depth: int = 2
+    auto_mount: bool = False  # Mount on creation if SSH/SMB
 
 
 class LibrarySourceOut(BaseModel):
@@ -180,6 +181,10 @@ class LibrarySourceOut(BaseModel):
     last_scan_at: Optional[datetime] = None
     scan_status: str = "idle"
     scan_error: Optional[str] = None
+    # Mount fields
+    mount_status: str = "unmounted"  # unmounted | mounted | error | unsupported
+    mount_point: Optional[str] = None
+    mount_error: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -205,6 +210,9 @@ class LibrarySourceOut(BaseModel):
             "last_scan_at": obj.last_scan_at,
             "scan_status": obj.scan_status,
             "scan_error": obj.scan_error,
+            "mount_status": getattr(obj, 'mount_status', 'unsupported'),
+            "mount_point": getattr(obj, 'mount_point', None),
+            "mount_error": getattr(obj, 'mount_error', None),
             "created_at": obj.created_at,
             "updated_at": obj.updated_at,
         }

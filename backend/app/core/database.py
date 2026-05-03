@@ -89,3 +89,19 @@ async def _migrate_phase5() -> None:
                 await conn.execute(sqlalchemy.text(
                     f"ALTER TABLE translation_tasks ADD COLUMN {col_name} {col_type}"
                 ))
+
+        # ── Phase 6: Mount support columns ──
+        result = await conn.execute(sqlalchemy.text("PRAGMA table_info(library_sources)"))
+        source_cols = {row[1] for row in result}
+
+        source_new_columns = {
+            "mount_status": "TEXT DEFAULT 'unmounted'",
+            "mount_point": "TEXT",
+            "mount_error": "TEXT",
+        }
+
+        for col_name, col_type in source_new_columns.items():
+            if col_name not in source_cols:
+                await conn.execute(sqlalchemy.text(
+                    f"ALTER TABLE library_sources ADD COLUMN {col_name} {col_type}"
+                ))

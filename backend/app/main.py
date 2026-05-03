@@ -91,6 +91,22 @@ async def lifespan(app: FastAPI):
     from app.services.task_runner import recover_pending_tasks
     await recover_pending_tasks()
 
+    # ── Auto-mount enabled remote sources ─────────────────────────────────
+    from app.services.mount_service import auto_mount_all
+    from app.core.config import settings as app_settings
+    if getattr(app_settings, 'mount_enabled', True):
+        try:
+            from app.core.database import async_session
+            async with async_session() as session:
+                mount_results = await auto_mount_all(session)
+                for r in mount_results:
+                    if r.get('mounted'):
+                        logger.info("Auto-mounted source", source_id=r.get('source_id'), type=r.get('source_type'), mount=r.get('mount_point'))
+                    else:
+                        logger.warning("Auto-mount failed", source_id=r.get('source_id'), error=r.get('error'))
+        except Exception as e:
+            logger.warning("Auto-mount failed at startup", error=str(e))
+
     # Start auto-scan scheduler
     import asyncio
     scheduler_task = asyncio.create_task(_auto_scan_scheduler())
@@ -103,6 +119,16 @@ async def lifespan(app: FastAPI):
         await scheduler_task
     except asyncio.CancelledError:
         pass
+
+    # ── Unmount all remote sources ────────────────────────────────────────
+    from app.services.mount_service import unmount_all as unmount_all_mounts
+    try:
+        results = await unmount_all_mounts()
+        for r in results:
+            logger.info("Unmounted source", path=r.get('path'), unmounted=r.get('unmounted'))
+    except Exception as e:
+        logger.warning("Unmount on shutdown failed", error=str(e))
+
     logger.info("Shutting down")
 
 

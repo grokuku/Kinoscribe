@@ -24,8 +24,10 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install ffmpeg (for media track extraction, Whisper audio extraction)
+# and sshfs/cifs-utils/sshpass (for remote mount support)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg && \
+    apt-get install -y --no-install-recommends \
+        ffmpeg sshfs cifs-utils sshpass fuse3 && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy installed packages from builder
@@ -36,7 +38,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY app/ ./app/
 
 # Create data directories
-RUN mkdir -p /app/data/uploads /app/data/output /app/data/work /app/data/cache
+RUN mkdir -p /app/data/uploads /app/data/output /app/data/work /app/data/cache /app/data/mounts
 
 # Environment defaults
 ENV DATABASE_URL=sqlite+aiosqlite:///./data/subtitle_translator.db \

@@ -78,6 +78,12 @@ class FilmOut(BaseModel):
     # Analysis
     lore_summary: Optional[str] = None
     analysis_status: str = "idle"  # idle | analyzing | failed
+    # NFO / metadata enrichment fields
+    genre: Optional[str] = None
+    studio: Optional[str] = None
+    rating: Optional[float] = None
+    imdb_id: Optional[str] = None
+    tmdb_id: Optional[str] = None
     # Library / file system integration
     library_id: Optional[str] = None
     path: Optional[str] = None

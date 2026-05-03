@@ -340,6 +340,12 @@ function ProfileTab({ film, glossary, lore, characters, onAnalyze, analyzing, on
         <MetaCard label="Langue cible" value={LANG_NAMES[film.target_language] || film.target_language.toUpperCase()} />
         {film.director && <MetaCard label="Réalisateur" value={film.director} />}
         {film.year && <MetaCard label="Année" value={String(film.year)} />}
+        {film.genre && <MetaCard label="Genre" value={film.genre} />}
+        {film.studio && <MetaCard label="Studio" value={film.studio} />}
+        {film.rating && <MetaCard label="Note" value={`⭐ ${film.rating}/10`} />}
+        {film.imdb_id && <MetaCard label="IMDb" value={film.imdb_id} mono />}
+        {film.imdb_id && <a href={`https://www.imdb.com/title/${film.imdb_id}`} target="_blank" rel="noopener noreferrer" className="block text-xs text-brand-400 hover:underline mt-1 mb-2">Voir sur IMDb ↗</a>}
+        {film.tmdb_id && <MetaCard label="TMDB" value={film.tmdb_id} mono />}
         {film.path && <MetaCard label="Dossier" value={film.path} mono />}
         {film.video_path && <MetaCard label="Vidéo" value={film.video_path.split('/').pop() || film.video_path} mono />}
         {film.poster_path && <MetaCard label="Poster" value="✅ Disponible" />}

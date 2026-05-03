@@ -749,6 +749,19 @@ class ScannerService:
                                     film.summary = entry.get('summary')
                                 if entry.get('raw_metadata'):
                                     film.raw_metadata = entry['raw_metadata']
+                                    # Populate enriched fields from NFO
+                                    nfo = entry['raw_metadata']
+                                    if nfo.get('genre') and not film.genre:
+                                        film.genre = nfo['genre']
+                                    if nfo.get('studio') and not film.studio:
+                                        film.studio = nfo['studio']
+                                    if nfo.get('rating') and not film.rating:
+                                        try: film.rating = float(nfo['rating'])
+                                        except (ValueError, TypeError): pass
+                                    if nfo.get('imdb_id') and not film.imdb_id:
+                                        film.imdb_id = nfo['imdb_id']
+                                    if nfo.get('tmdbid') and not film.tmdb_id:
+                                        film.tmdb_id = nfo['tmdbid']
                                 if entry.get('video_files'):
                                     film.video_path = entry['video_files'][0]
                                 if poster_local:
@@ -757,8 +770,22 @@ class ScannerService:
                                     film.has_existing_subs = True
                                 if not film.library_id:
                                     film.library_id = library_id
+
+                                # Create Character records from NFO cast if film has none yet
+                                nfo_cast = (entry.get('raw_metadata') or {}).get('cast', [])
+                                if nfo_cast and not film.characters:
+                                    from app.models.database import Character
+                                    for actor in nfo_cast[:20]:
+                                        char = Character(
+                                            film_id=film.id,
+                                            name=actor.get('name', ''),
+                                            description=f"Role: {actor.get('role', '')}" if actor.get('role') else None,
+                                        )
+                                        film_session.add(char)
+
                                 progress.films_updated += 1
                             else:
+                                nfo = entry.get('raw_metadata') or {}
                                 film = Film(
                                     title=entry.get('title', Path(entry['directory']).name),
                                     year=entry.get('year'),
@@ -772,12 +799,30 @@ class ScannerService:
                                     raw_metadata=entry.get('raw_metadata'),
                                     poster_path=poster_local or '',
                                     has_existing_subs=bool(entry.get('subtitles')),
+                                    genre=nfo.get('genre') or None,
+                                    studio=nfo.get('studio') or None,
+                                    rating=float(nfo['rating']) if nfo.get('rating') else None,
+                                    imdb_id=nfo.get('imdb_id') or None,
+                                    tmdb_id=nfo.get('tmdbid') or None,
                                 )
                                 film_session.add(film)
                                 progress.films_created += 1
 
                             await film_session.commit()
                             await film_session.refresh(film)
+
+                            # Create Character records from NFO cast (only for new films)
+                            nfo_cast = (entry.get('raw_metadata') or {}).get('cast', [])
+                            if nfo_cast and not film.characters:
+                                from app.models.database import Character
+                                for actor in nfo_cast[:20]:
+                                    char = Character(
+                                        film_id=film.id,
+                                        name=actor.get('name', ''),
+                                        description=f"Role: {actor.get('role', '')}" if actor.get('role') else None,
+                                    )
+                                    film_session.add(char)
+                                await film_session.commit()
 
                             # Cache SSH poster after film is committed (has ID now)
                             if is_ssh and entry.get('poster_file') and fs is not None and film.id:

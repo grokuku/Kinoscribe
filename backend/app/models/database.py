@@ -84,6 +84,13 @@ class Film(Base):
     lore_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     analysis_status: Mapped[str] = mapped_column(String, default="idle")  # idle | analyzing | failed
 
+    # NFO-enriched fields
+    genre: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    studio: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    rating: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    imdb_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    tmdb_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
     # Library / file system integration
     library_id: Mapped[Optional[str]] = mapped_column(ForeignKey("libraries.id", ondelete="SET NULL"), nullable=True)
     path: Mapped[Optional[str]] = mapped_column(String, nullable=True)            # chemin absolu du dossier du film

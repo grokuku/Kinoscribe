@@ -13,6 +13,12 @@ export interface Film {
   characters: Character[];
   lore_summary: string | null;
   analysis_status: string;  // idle | analyzing | failed
+  // NFO / metadata enrichment
+  genre: string | null;
+  studio: string | null;
+  rating: number | null;
+  imdb_id: string | null;
+  tmdb_id: string | null;
   // Library / filesystem integration
   library_id: string | null;
   path: string | null;

@@ -317,6 +317,29 @@ async def enrich_film_metadata(
         except Exception as e:
             logger.warning("Failed to download poster", url=result.poster_url, error=str(e))
 
+    # Update enriched NFO fields
+    if result.imdb_id and not film.imdb_id:
+        film.imdb_id = result.imdb_id
+        updated = True
+    if result.rating and not film.rating:
+        film.rating = result.rating
+        updated = True
+    if result.genres and not film.genre:
+        film.genre = ', '.join(result.genres)
+        updated = True
+
+    # Create Character records from enrichment cast if film has none yet
+    if result.cast and not film.characters:
+        from app.models.database import Character
+        for actor in result.cast[:20]:
+            char = Character(
+                film_id=film.id,
+                name=actor.get('name', ''),
+                description=f"Role: {actor.get('role', '')}" if actor.get('role') else None,
+            )
+            session.add(char)
+        updated = True
+
     if updated:
         await session.commit()
         await session.refresh(film)

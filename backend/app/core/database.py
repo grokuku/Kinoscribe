@@ -63,6 +63,11 @@ async def _migrate_phase5() -> None:
             "has_existing_subs": "INTEGER DEFAULT 0",
             "lore_summary": "TEXT",
             "analysis_status": "TEXT DEFAULT 'idle'",
+            "genre": "TEXT",
+            "studio": "TEXT",
+            "rating": "REAL",
+            "imdb_id": "TEXT",
+            "tmdb_id": "TEXT",
         }
 
         for col_name, col_type in new_columns.items():

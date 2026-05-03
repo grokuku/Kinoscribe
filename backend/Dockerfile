@@ -30,6 +30,10 @@ RUN apt-get update && \
         ffmpeg sshfs cifs-utils sshpass fuse3 && \
     rm -rf /var/lib/apt/lists/*
 
+# Enable allow_other in fuse.conf (required for sshfs mounts accessible by all processes)
+RUN if [ -f /etc/fuse.conf ]; then sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf; \
+    echo 'user_allow_other' >> /etc/fuse.conf; fi
+
 # Copy installed packages from builder
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin

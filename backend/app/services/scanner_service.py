@@ -682,22 +682,42 @@ class ScannerService:
                 await session.commit()
 
                 try:
-                    # Determine filesystem: use mount point if source is mounted
-                    scan_path = source.ssh_remote_path or source.path
-                    effective_local_path = getattr(source, 'mount_point', None)
+                    # Auto-mount remote sources if not already mounted
+                    if source.source_type in ("ssh", "smb", "cifs"):
+                        from app.services.mount_service import ensure_mounted
+                        mount_result = await ensure_mounted(source)
+                        if not mount_result.get("mounted"):
+                            progress.errors.append(f"Mount failed for {source.ssh_host or source.path}: {mount_result.get('error', 'unknown')}")
+                            source.scan_status = "error"
+                            source.scan_error = f"Mount failed: {mount_result.get('error', 'unknown')}"
+                            await session.commit()
+                            continue
+                        # Refresh source to get updated mount_point
+                        await session.refresh(source)
 
-                    if source.source_type == "local" or (effective_local_path and effective_local_path.strip()):
-                        # Local or mounted remote — use LocalFilesystem
+                    # Determine filesystem and scan path
+                    if source.source_type == "local":
                         fs = LocalFilesystem()
-                        # If source is mounted, use the mount point as scan path
-                        if effective_local_path and effective_local_path.strip():
-                            scan_path = effective_local_path
-                            # Also update source.path for scanner downstream
-                            logger.info("Using mount point for source", source_id=source.id, mount=effective_local_path)
-                    elif source.source_type == "ssh":
-                        fs = await self._connect_ssh(source, progress)
-                        if fs is None:
-                            continue  # error already logged in progress
+                        scan_path = source.path
+                    elif source.source_type in ("ssh", "smb", "cifs"):
+                        mount_path = getattr(source, 'mount_point', None) or mount_result.get("mount_point", "")
+                        if mount_path and os.path.isdir(mount_path):
+                            fs = LocalFilesystem()
+                            scan_path = mount_path
+                            logger.info("Using mount point for source", source_id=source.id, mount=mount_path)
+                        else:
+                            # Fallback: try SSH filesystem directly
+                            if source.source_type == "ssh":
+                                fs = await self._connect_ssh(source, progress)
+                                if fs is None:
+                                    continue
+                                scan_path = source.ssh_remote_path or source.path
+                            else:
+                                progress.errors.append(f"Source not mounted and no fallback: {source.source_type}")
+                                source.scan_status = "error"
+                                source.scan_error = f"Not mounted and no fallback available"
+                                await session.commit()
+                                continue
                     else:
                         progress.errors.append(f"Unsupported source type: {source.source_type}")
                         source.scan_status = "error"
@@ -831,8 +851,8 @@ class ScannerService:
                                     film_session.add(char)
                                 await film_session.commit()
 
-                            # Cache SSH poster after film is committed (has ID now)
-                            if is_ssh and entry.get('poster_file') and fs is not None and film.id:
+                            # Cache poster for SSH sources (only if using SSHFilesystem, not mount)
+                            if is_ssh and isinstance(fs, SSHFilesystem) and entry.get('poster_file') and film.id:
                                 cached = await cache_poster_locally(fs, entry['poster_file'], film.id)
                                 if cached:
                                     film.poster_path = cached

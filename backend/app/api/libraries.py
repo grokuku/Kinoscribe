@@ -122,6 +122,18 @@ async def add_source(library_id: str, data: LibrarySourceCreate, session: AsyncS
     session.add(source)
     await session.commit()
     await session.refresh(source)
+
+    # Auto-mount remote sources after creation
+    if source.source_type in ("ssh", "smb", "cifs"):
+        from app.core.config import settings as app_settings
+        if getattr(app_settings, 'mount_enabled', True):
+            from app.services.mount_service import ensure_mounted
+            result = await ensure_mounted(source, session)
+            logger.info("Auto-mount on source creation",
+                        source_id=source.id, mounted=result.get("mounted"),
+                        mount_point=result.get("mount_point"),
+                        error=result.get("error"))
+
     return _mask_source(source)
 
 
@@ -155,6 +167,14 @@ async def delete_source(library_id: str, source_id: str, delete_films: bool = Tr
     source = await session.get(LibrarySource, source_id)
     if not source or source.library_id != library_id:
         raise HTTPException(404, "Source not found")
+
+    # Unmount if mounted
+    if source.source_type in ("ssh", "smb", "cifs"):
+        from app.services.mount_service import unmount_source
+        try:
+            await unmount_source(source)
+        except Exception as e:
+            logger.warning("Failed to unmount source on deletion", source_id=source_id, error=str(e))
 
     if delete_films:
         # Determine the scan path for this source

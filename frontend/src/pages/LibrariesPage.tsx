@@ -169,30 +169,9 @@ export default function LibrariesPage() {
     catch (e: any) { toast.error('Erreur : ' + e.message); }
   }
   async function handleDeleteSource(libraryId: string, sourceId: string) {
-    // Unmount first if mounted
-    const source = libraries.flatMap(l => l.sources).find(s => s.id === sourceId);
-    if (source && source.mount_status === 'mounted') {
-      try { await api_POST(`/libraries/${libraryId}/sources/${sourceId}/unmount`); } catch { /* ignore */ }
-    }
     if (!await confirm('Supprimer cette source et les films qu\'elle contient ?')) return;
     try { await api_DELETE(`/libraries/${libraryId}/sources/${sourceId}?delete_films=true`); await loadLibraries(); toast.success('Source supprimée'); }
     catch (e: any) { toast.error('Erreur : ' + e.message); }
-  }
-  async function handleMountSource(libraryId: string, sourceId: string) {
-    try {
-      const result = await api_POST(`/libraries/${libraryId}/sources/${sourceId}/mount`);
-      if (result.mounted) { toast.success('Source montée avec succès'); }
-      else { toast.error('Échec du montage : ' + (result.error || 'Erreur inconnue')); }
-      await loadLibraries();
-    } catch (e: any) { toast.error('Erreur de montage : ' + e.message); }
-  }
-  async function handleUnmountSource(libraryId: string, sourceId: string) {
-    try {
-      const result = await api_POST(`/libraries/${libraryId}/sources/${sourceId}/unmount`);
-      if (result.unmounted) { toast.success('Source démontée'); }
-      else { toast.error('Échec du démontage : ' + (result.error || 'Erreur inconnue')); }
-      await loadLibraries();
-    } catch (e: any) { toast.error('Erreur de démontage : ' + e.message); }
   }
   async function handleScan(libraryId: string) {
     try { await api_POST(`/libraries/${libraryId}/scan`); toast.info('Scan lancé'); }
@@ -287,7 +266,7 @@ export default function LibrariesPage() {
                     <p className="text-sm text-gray-600 text-center py-4">Aucun dossier source — ajoutez-en un ci-dessous</p>
                   )}
                   {lib.sources.map((source) => (
-                    <SourceRow key={source.id} source={source} onDelete={() => handleDeleteSource(lib.id, source.id)} onMount={() => handleMountSource(lib.id, source.id)} onUnmount={() => handleUnmountSource(lib.id, source.id)} />
+                    <SourceRow key={source.id} source={source} onDelete={() => handleDeleteSource(lib.id, source.id)} />
                   ))}
 
                   {showAddSource === lib.id ? (
@@ -316,7 +295,7 @@ export default function LibrariesPage() {
 
 // ─── Source Row ──────────────────────────────────────────────────────────
 
-function SourceRow({ source, onDelete, onMount, onUnmount }: { source: LibrarySource; onDelete: () => void; onMount: () => void; onUnmount: () => void }) {
+function SourceRow({ source, onDelete }: { source: LibrarySource; onDelete: () => void }) {
   const Icon = source.source_type === 'ssh' ? Wifi : HardDrive;
   const isErr = source.scan_status === 'error';
   const isMounted = source.mount_status === 'mounted';
@@ -352,27 +331,17 @@ function SourceRow({ source, onDelete, onMount, onUnmount }: { source: LibrarySo
         </div>
         <button onClick={onDelete} className="btn-ghost text-gray-600 hover:text-red-400 !p-1.5 flex-shrink-0" title="Supprimer"><X className="w-4 h-4" /></button>
       </div>
-      {/* Mount status row */}
+      {/* Mount status row (informational only — mounting is automatic) */}
       {canMount && (
         <div className="flex items-center gap-2 pl-12">
           {isMounted ? (
-            <>
-              <span className="text-[10px] font-medium text-emerald-400 flex items-center gap-1">
-                <CheckCircle2 className="w-3 h-3" /> Monté
-              </span>
-              {source.mount_point && <span className="text-[10px] text-gray-600 font-mono truncate max-w-[200px]" title={source.mount_point}>{source.mount_point}</span>}
-              <button onClick={onUnmount} className="text-[10px] text-gray-500 hover:text-red-400 ml-1" title="Démonter">Démonter</button>
-            </>
+            <span className="text-[10px] font-medium text-emerald-400 flex items-center gap-1">
+              <CheckCircle2 className="w-3 h-3" /> Monté
+            </span>
           ) : isMountError ? (
-            <>
-              <span className="text-[10px] font-medium text-red-400">⚠️ Erreur : {source.mount_error?.slice(0, 80)}</span>
-              <button onClick={onMount} className="text-[10px] text-brand-400 hover:text-brand-300 ml-1">Réessayer</button>
-            </>
+            <span className="text-[10px] font-medium text-red-400">⚠️ Erreur montage : {source.mount_error?.slice(0, 80)}</span>
           ) : (
-            <>
-              <span className="text-[10px] text-gray-500">Non monté</span>
-              <button onClick={onMount} className="text-[10px] text-brand-400 hover:text-brand-300 ml-1">Monter</button>
-            </>
+            <span className="text-[10px] text-gray-500">Sera monté automatiquement au scan</span>
           )}
         </div>
       )}

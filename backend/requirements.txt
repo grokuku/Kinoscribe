@@ -19,14 +19,17 @@ pysubs2
 # SSH/SFTP
 asyncssh
 
-# Whisper transcription (optional — install for audio transcription)
-# faster-whisper  # Uncomment to enable Whisper transcription
+# Whisper transcription
+faster-whisper
+
+# Movie metadata (no API key needed)
+cinemagoer
 
 # Utilities
 python-dotenv
 
 # Encryption
- cryptography>=42.0
+cryptography>=42.0
 
 # Testing
 pytest>=8.0

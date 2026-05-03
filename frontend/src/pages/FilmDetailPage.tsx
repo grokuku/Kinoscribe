@@ -59,6 +59,7 @@ export default function FilmDetailPage() {
   const [extractingTracks, setExtractingTracks] = useState(false);
   const [installing, setInstalling] = useState<string | null>(null);
   const [rescanning, setRescanning] = useState(false);
+  const [enriching, setEnriching] = useState(false);
 
   // Load enrichments when film is loaded
   useEffect(() => {
@@ -132,6 +133,20 @@ export default function FilmDetailPage() {
       setTimeout(() => refreshFilm(), 3000);
     } catch (e: any) { alert('Erreur : ' + e.message); }
     finally { setRescanning(false); }
+  };
+
+  const handleEnrich = async () => {
+    setEnriching(true);
+    try {
+      const result = await api.enrichFilm(film!.id);
+      if (result.fields_updated) {
+        refreshFilm();
+        alert(`Metadonnées enrichies depuis ${result.source === 'tmdb' ? 'TMDB' : 'IMDb'} !`);
+      } else {
+        alert('Aucune nouvelle métadonnée trouvée.');
+      }
+    } catch (e: any) { alert('Erreur enrichissement : ' + e.message); }
+    finally { setEnriching(false); }
   };
 
   const handleTranscribe = async () => {
@@ -238,7 +253,7 @@ export default function FilmDetailPage() {
       </div>
 
       {tab === 'profile' && (
-        <ProfileTab film={film} glossary={glossary} lore={lore} characters={film.characters} onAnalyze={handleAnalyze} analyzing={analyzing || isAnalyzing} />
+        <ProfileTab film={film} glossary={glossary} lore={lore} characters={film.characters} onAnalyze={handleAnalyze} analyzing={analyzing || isAnalyzing} onEnrich={handleEnrich} enriching={enriching} />
       )}
       {tab === 'translation' && (
         <TranslationTab
@@ -258,9 +273,9 @@ export default function FilmDetailPage() {
 
 // ─── Profile Tab ────────────────────────────────────────────────────────────
 
-function ProfileTab({ film, glossary, lore, characters, onAnalyze, analyzing }: {
+function ProfileTab({ film, glossary, lore, characters, onAnalyze, analyzing, onEnrich, enriching }: {
   film: any; glossary: GlossaryEntry[]; lore: any; characters: Character[];
-  onAnalyze: () => void; analyzing: boolean;
+  onAnalyze: () => void; analyzing: boolean; onEnrich: () => void; enriching: boolean;
 }) {
   return (
     <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 animate-fade-in">
@@ -318,6 +333,9 @@ function ProfileTab({ film, glossary, lore, characters, onAnalyze, analyzing }: 
       {/* Sidebar metadata */}
       <div className="space-y-4">
         <h2 className="section-title">Métadonnées</h2>
+        <button onClick={onEnrich} disabled={enriching} className="btn-secondary w-full !text-xs mb-2">
+          {enriching ? <Loader2 className="w-3 h-3 animate-spin" /> : <Film className="w-3 h-3" />} Enrichir depuis IMDb
+        </button>
         <MetaCard label="Langue source" value={LANG_NAMES[film.source_language] || film.source_language.toUpperCase()} />
         <MetaCard label="Langue cible" value={LANG_NAMES[film.target_language] || film.target_language.toUpperCase()} />
         {film.director && <MetaCard label="Réalisateur" value={film.director} />}

@@ -15,6 +15,9 @@ services:
       - "8000:8000"
     volumes:
       - backend-data:/app/data
+      # Mount your media libraries here so the backend can access video files
+      # Example: mount your films directory
+      # - /path/to/your/films:/media/films:ro
     environment:
       - DATABASE_URL=sqlite+aiosqlite:///./data/subtitle_translator.db
       - OLLAMA_BASE_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
@@ -25,6 +28,8 @@ services:
       - CPS_LIMIT=25
       - SLIDING_WINDOW_SIZE=20
       - DEBUG=false
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - SSH_KNOWN_HOSTS=${SSH_KNOWN_HOSTS:-none}
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

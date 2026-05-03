@@ -256,6 +256,88 @@ async def rescan_film(
     return {"status": "rescanning", "film_id": film_id}
 
 
+@router.post("/{film_id}/enrich")
+async def enrich_film_metadata(
+    film_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    Enrich film metadata from online sources (Cinemagoer/IMDb or TMDB).
+    No API key needed for Cinemagoer. TMDB requires an API key in settings.
+    """
+    from app.services.metadata_service import enrich_film_metadata
+
+    film = await session.get(Film, film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+
+    # Get TMDB API key from settings if available
+    from app.services.settings_service import settings_service
+    tmdb_key = await settings_service.get(session, "tmdb_api_key") or None
+    prefer_source = "cinemagoer"  # Default to free source
+
+    result = await enrich_film_metadata(
+        title=film.title,
+        year=film.year,
+        prefer_source=prefer_source,
+        tmdb_api_key=tmdb_key if tmdb_key else None,
+    )
+
+    if not result:
+        raise HTTPException(404, f"No online metadata found for '{film.title}'")
+
+    # Update film with enriched data
+    updated = False
+    if result.title and not film.title:
+        film.title = result.title
+        updated = True
+    if result.year and not film.year:
+        film.year = result.year
+        updated = True
+    if result.director and not film.director:
+        film.director = result.director
+        updated = True
+    if result.plot and not film.summary:
+        film.summary = result.plot
+        updated = True
+    if result.poster_url and not film.poster_path:
+        # Download and cache poster
+        import hashlib
+        import urllib.request
+        try:
+            cache_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'posters')
+            os.makedirs(cache_dir, exist_ok=True)
+            ext = '.jpg'
+            if 'png' in (result.poster_url or ''):
+                ext = '.png'
+            poster_path = os.path.join(cache_dir, f"{film_id}{ext}")
+            urllib.request.urlretrieve(result.poster_url, poster_path)
+            film.poster_path = poster_path
+            updated = True
+        except Exception as e:
+            logger.warning("Failed to download poster", url=result.poster_url, error=str(e))
+
+    if updated:
+        await session.commit()
+        await session.refresh(film)
+
+    return {
+        "status": "enriched",
+        "film_id": film_id,
+        "source": result.source,
+        "title": result.title,
+        "year": result.year,
+        "director": result.director,
+        "plot": result.plot,
+        "rating": result.rating,
+        "genres": result.genres,
+        "cast_count": len(result.cast),
+        "poster_url": result.poster_url,
+        "imdb_id": result.imdb_id,
+        "fields_updated": updated,
+    }
+
+
 @router.get("/{film_id}/poster")
 async def get_film_poster(
     film_id: str,
@@ -296,34 +378,42 @@ async def stream_film_video(
     film_id: str,
     session: AsyncSession = Depends(get_session),
 ):
-    """Stream the film's video file with HTTP range support for HTML5 video players."""
-    from starlette.responses import StreamingResponse
+    """Stream the film's video file for HTML5 players.
+    Only works for local filesystem films. SSH films are not streamable through this endpoint."""
+    from starlette.responses import FileResponse
 
     film = await session.get(Film, film_id)
     if not film:
         raise HTTPException(404, "Film not found")
     if not film.video_path:
         raise HTTPException(400, "No video file registered for this film")
-    if not os.path.isfile(film.video_path):
-        raise HTTPException(404, f"Video file not found: {film.video_path}")
 
-    video_path = film.video_path
-    file_size = os.path.getsize(video_path)
-    ext = os.path.splitext(video_path)[1].lower()
-    mime_map = {'.mp4': 'video/mp4', '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo', 
+    # Only local files are streamable
+    if not os.path.isfile(film.video_path):
+        # Check if this is an SSH film (path doesn't exist locally)
+        is_ssh = False
+        if film.library_id:
+            from app.models.database import LibrarySource
+            result = await session.execute(
+                select(LibrarySource).where(LibrarySource.library_id == film.library_id)
+            )
+            sources = result.scalars().all()
+            is_ssh = any(s.source_type == 'ssh' for s in sources)
+        if is_ssh:
+            raise HTTPException(400, "Video streaming is not available for SSH library sources. The video file is on a remote server.")
+        raise HTTPException(404, f"Video file not found on disk: {film.video_path}")
+
+    # Determine MIME type from extension
+    ext = os.path.splitext(film.video_path)[1].lower()
+    mime_map = {'.mp4': 'video/mp4', '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo',
                 '.mov': 'video/quicktime', '.wmv': 'video/x-ms-wmv', '.webm': 'video/webm'}
     media_type = mime_map.get(ext, 'video/mp4')
 
-    def iterfile():
-        with open(video_path, 'rb') as f:
-            while chunk := f.read(1024 * 1024):  # 1MB chunks
-                yield chunk
-
-    headers = {
-        'Content-Length': str(file_size),
-        'Accept-Ranges': 'bytes',
-    }
-    return StreamingResponse(iterfile(), media_type=media_type, headers=headers)
+    return FileResponse(
+        film.video_path,
+        media_type=media_type,
+        filename=os.path.basename(film.video_path),
+    )
 
 
 # ─── Existing subtitles ──────────────────────────────────────────────────────

@@ -49,6 +49,8 @@ export const api = {
     request<{ status: string; film_id: string }>(`/films/${filmId}/analyze`, { method: 'POST' }),
   rescanFilm: (filmId: string) =>
     request<{ status: string; film_id: string }>(`/films/${filmId}/rescan`, { method: 'POST' }),
+  enrichFilm: (filmId: string) =>
+    request<{ status: string; film_id: string; source: string; title: string; fields_updated: boolean }>(`/films/${filmId}/enrich`, { method: 'POST' }),
   transcribeFilm: (filmId: string, modelSize?: string, language?: string) =>
     request<{ status: string; film_id: string; model: string }>(`/films/${filmId}/transcribe?model_size=${modelSize || 'medium'}${language ? `&language=${language}` : ''}`, { method: 'POST' }),
   syncSubtitles: (filmId: string, subtitlePath: string, modelSize?: string) =>

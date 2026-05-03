@@ -54,11 +54,14 @@ async def _get_filesystem_for_film(
 
         # If source is mounted, use the local mount path directly
         if mp and mp.strip():
+            mount_path = os.path.normpath(mp)
+            # Film path might already be under the mount point (from mount-aware scan)
+            normalized_film_path = os.path.normpath(film.path.rstrip("/")) if film.path else ""
+            if normalized_film_path.startswith(mount_path) and os.path.isdir(normalized_film_path):
+                return None, normalized_film_path
+            # Translate remote path to mount path (film scanned before mount was available)
             if film.path and film.path.rstrip("/").startswith(source_path):
-                return None, film.path  # Already using local path
-            # Translate remote path to mount path
-            if film.path and film.path.rstrip("/").startswith(source_path):
-                local_path = film.path.rstrip("/").replace(source_path, mp.rstrip("/"), 1)
+                local_path = film.path.rstrip("/").replace(source_path, mount_path.rstrip("/"), 1)
                 if os.path.isdir(local_path):
                     return None, local_path
 
@@ -149,10 +152,16 @@ async def install_subtitle_to_source(
             for source in sources:
                 mp = getattr(source, 'mount_point', None)
                 if mp and mp.strip():
+                    mount_path = os.path.normpath(mp)
                     remote_path = (source.ssh_remote_path or source.path or "").rstrip("/")
+                    # Film path may already be under mount point
+                    normalized_film_path = os.path.normpath(film.path.rstrip("/")) if film.path else ""
+                    if normalized_film_path.startswith(mount_path) and os.path.isdir(normalized_film_path):
+                        film_dir = normalized_film_path
+                        break
+                    # Translate remote path to mount path
                     if film.path and film.path.rstrip("/").startswith(remote_path):
-                        # Translate remote path to local mount path
-                        film_dir = film.path.rstrip("/").replace(remote_path, mp.rstrip("/"), 1)
+                        film_dir = film.path.rstrip("/").replace(remote_path, mount_path.rstrip("/"), 1)
                         break
 
         if not os.path.isdir(film_dir):

@@ -210,8 +210,15 @@ class LocalFilesystem(FilesystemProvider):
 
     async def listdir(self, path: str) -> List[str]:
         try:
-            return sorted(os.listdir(path))
-        except (PermissionError, FileNotFoundError):
+            entries = sorted(os.listdir(path))
+            logger.debug("LocalFilesystem.listdir", path=path, count=len(entries))
+            return entries
+        except (PermissionError, FileNotFoundError) as e:
+            logger.warning("LocalFilesystem.listdir failed", path=path, error=str(e))
+            return []
+        except OSError as e:
+            # Stale FUSE mounts raise OSError with errno=107 (ESTALE / Transport endpoint is not connected)
+            logger.error("LocalFilesystem.listdir OS error (stale mount?)", path=path, errno=e.errno, error=str(e))
             return []
 
     async def is_dir(self, path: str) -> bool:
@@ -685,7 +692,7 @@ class ScannerService:
                     # Auto-mount remote sources if not already mounted
                     if source.source_type in ("ssh", "smb", "cifs"):
                         from app.services.mount_service import ensure_mounted
-                        mount_result = await ensure_mounted(source)
+                        mount_result = await ensure_mounted(source, session)
                         if not mount_result.get("mounted"):
                             progress.errors.append(f"Mount failed for {source.ssh_host or source.path}: {mount_result.get('error', 'unknown')}")
                             source.scan_status = "error"
@@ -694,17 +701,42 @@ class ScannerService:
                             continue
                         # Refresh source to get updated mount_point
                         await session.refresh(source)
+                        logger.info("Mount ready for scan", source_id=source.id,
+                                    mount_point=source.mount_point, mount_status=source.mount_status)
 
                     # Determine filesystem and scan path
                     if source.source_type == "local":
                         fs = LocalFilesystem()
                         scan_path = source.path
                     elif source.source_type in ("ssh", "smb", "cifs"):
-                        mount_path = getattr(source, 'mount_point', None) or mount_result.get("mount_point", "")
+                        # Mount was ensured above — use mount point
+                        mount_path = source.mount_point or ""
+                        # Normalize the path
+                        mount_path = os.path.normpath(mount_path) if mount_path else ""
                         if mount_path and os.path.isdir(mount_path):
                             fs = LocalFilesystem()
                             scan_path = mount_path
-                            logger.info("Using mount point for source", source_id=source.id, mount=mount_path)
+                            # Quick health check: try to list mount point
+                            try:
+                                test_entries = os.listdir(mount_path)
+                                logger.info("Using mount point for source", source_id=source.id,
+                                            mount=mount_path, entries=len(test_entries))
+                            except OSError as e:
+                                logger.error("Mount point not accessible, attempting remount",
+                                             source_id=source.id, mount=mount_path, error=str(e))
+                                # Force remount
+                                from app.services.mount_service import unmount_path as do_unmount
+                                await do_unmount(mount_path)
+                                result2 = await ensure_mounted(source, session)
+                                if not result2.get("mounted"):
+                                    progress.errors.append(f"Remount failed: {result2.get('error')}")
+                                    source.scan_status = "error"
+                                    source.scan_error = f"Remount failed: {result2.get('error')}"
+                                    await session.commit()
+                                    continue
+                                await session.refresh(source)
+                                mount_path = source.mount_point or ""
+                                scan_path = mount_path
                         else:
                             # Fallback: try SSH filesystem directly
                             if source.source_type == "ssh":

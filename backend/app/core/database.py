@@ -105,3 +105,23 @@ async def _migrate_phase5() -> None:
                 await conn.execute(sqlalchemy.text(
                     f"ALTER TABLE library_sources ADD COLUMN {col_name} {col_type}"
                 ))
+
+        # ── Phase 7: Normalize mount points and reset stale mount status ──
+        # Old code stored non-normalized paths like /app/app/services/../../data/mounts/...
+        # Reset all mount statuses so they get re-mounted with correct paths on next scan.
+        import os as _os
+        _mount_base = _os.path.normpath("/app/data/mounts")
+        try:
+            # Reset mount status for all remote sources so they get re-mounted
+            await conn.execute(sqlalchemy.text(
+                "UPDATE library_sources SET mount_status = 'unmounted', "
+                "mount_point = NULL, mount_error = NULL "
+                "WHERE source_type IN ('ssh', 'smb', 'cifs')"
+            ))
+            # Also fix any mount_point that contains the old non-normalized path
+            await conn.execute(sqlalchemy.text(
+                f"UPDATE library_sources SET mount_point = NULL "
+                f"WHERE mount_point IS NOT NULL AND mount_point NOT LIKE '{_mount_base}/%'"
+            ))
+        except Exception:
+            pass  # Non-critical — mount status will be refreshed on next scan

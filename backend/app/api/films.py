@@ -402,7 +402,7 @@ async def stream_film_video(
     session: AsyncSession = Depends(get_session),
 ):
     """Stream the film's video file for HTML5 players.
-    Only works for local filesystem films. SSH films are not streamable through this endpoint."""
+    Works for local films and mounted remote films (sshfs/cifs)."""
     from starlette.responses import FileResponse
 
     film = await session.get(Film, film_id)
@@ -411,9 +411,14 @@ async def stream_film_video(
     if not film.video_path:
         raise HTTPException(400, "No video file registered for this film")
 
-    # Determine accessible path: check mount points first
+    # Determine accessible path
     accessible_path = None
-    if film.library_id:
+
+    # 1. Fast path: does the video path already exist locally?
+    if os.path.isfile(film.video_path):
+        accessible_path = film.video_path
+    elif film.library_id:
+        # 2. Try translating remote path to mount point
         from app.models.database import LibrarySource
         from sqlalchemy import select as sa_select2
         result2 = await session.execute(
@@ -421,37 +426,24 @@ async def stream_film_video(
         )
         sources2 = result2.scalars().all()
         for source2 in sources2:
-            mount_point = getattr(source2, 'mount_point', None)
-            if mount_point and mount_point.strip():
+            mount_mp = getattr(source2, 'mount_point', None)
+            if mount_mp and mount_mp.strip():
+                mount_path = os.path.normpath(mount_mp)
                 remote_path = (source2.ssh_remote_path or source2.path or "").rstrip("/")
+                # Path starts with remote path → translate
                 if film.video_path.startswith(remote_path):
-                    accessible_path = film.video_path.replace(remote_path, mount_point.rstrip('/'), 1)
+                    translated = film.video_path.replace(remote_path, mount_path.rstrip('/'), 1)
+                    if os.path.isfile(translated):
+                        accessible_path = translated
+                        break
+                # Path might already be under mount_path
+                normalized = os.path.normpath(film.video_path)
+                if normalized.startswith(mount_path) and os.path.isfile(normalized):
+                    accessible_path = normalized
                     break
 
-    if accessible_path and os.path.isfile(accessible_path):
-        # File accessible via mount point — stream it directly
-        ext = os.path.splitext(accessible_path)[1].lower()
-    elif accessible_path:
-        # Mount point set but file not found — fall through to error
-        is_ssh = any(s.source_type == 'ssh' for s in (sources2 if 'sources2' in dir() else []))
-        if is_ssh:
-            raise HTTPException(400, "Video file not found at mount point. Check that the mount is active.")
-        raise HTTPException(404, f"Video file not found on disk: {film.video_path}")
-    else:
-        # No mount point — check local
-        if not os.path.isfile(film.video_path):
-            is_ssh = False
-            if film.library_id:
-                from app.models.database import LibrarySource
-                result3 = await session.execute(
-                    select(LibrarySource).where(LibrarySource.library_id == film.library_id)
-                )
-                sources3 = result3.scalars().all()
-                is_ssh = any(s.source_type == 'ssh' for s in sources3)
-            if is_ssh:
-                raise HTTPException(400, "Video streaming is not available for SSH library sources. The video file is on a remote server.")
-            raise HTTPException(404, f"Video file not found on disk: {film.video_path}")
-        accessible_path = film.video_path
+    if not accessible_path:
+        raise HTTPException(404, f"Video file not found on disk: {film.video_path}. Check that the mount is active.")
 
     ext = os.path.splitext(accessible_path)[1].lower()
     mime_map = {'.mp4': 'video/mp4', '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo',
@@ -467,11 +459,15 @@ async def stream_film_video(
 
 async def _ensure_local_video(film: Film, session) -> str:
     """Ensure video file is accessible locally.
-    1. If mounted (mount_point on source) → use local mount path directly
-    2. If local path exists → use it directly
-    3. If SSH → download to work dir
+    1. If path exists locally (mount point or local source) → use directly
+    2. If mounted (mount_point on source) → translate remote path to mount path
+    3. If SSH without mount → download to work dir
     """
-    # Check if the video is on a mounted source
+    # Fast path: does the video path already exist locally?
+    if film.video_path and os.path.isfile(film.video_path):
+        return film.video_path
+
+    # Check if the video is on a mounted source — translate remote path
     if film.library_id:
         from app.models.database import LibrarySource
         result = await session.execute(
@@ -479,19 +475,20 @@ async def _ensure_local_video(film: Film, session) -> str:
         )
         sources = result.scalars().all()
         for source in sources:
-            mount_point = getattr(source, 'mount_point', None)
-            if mount_point and mount_point.strip():
-                # The remote path is mounted locally
+            mount_mp = getattr(source, 'mount_point', None)
+            if mount_mp and mount_mp.strip():
+                # Try translating remote path to mount path
                 remote_path = (source.ssh_remote_path or source.path or "").rstrip("/")
+                mount_path = os.path.normpath(mount_mp)
                 if film.video_path and film.video_path.startswith(remote_path):
-                    # Translate remote path to local mount path
-                    local_path = film.video_path.replace(remote_path, mount_point.rstrip('/'), 1)
+                    local_path = film.video_path.replace(remote_path, mount_path.rstrip('/'), 1)
                     if os.path.isfile(local_path):
                         return local_path
-
-    # Check if local path exists
-    if film.video_path and os.path.isfile(film.video_path):
-        return film.video_path
+                # Also try: video path might be inside the mount point but with a different prefix
+                # e.g. video_path = /app/data/mounts/abc123/Film/movie.mkv
+                normalized_video = os.path.normpath(film.video_path) if film.video_path else ""
+                if normalized_video.startswith(mount_path) and os.path.isfile(normalized_video):
+                    return normalized_video
 
     # Must be SSH without mount — download to work dir
     if not film.video_path or not film.library_id:

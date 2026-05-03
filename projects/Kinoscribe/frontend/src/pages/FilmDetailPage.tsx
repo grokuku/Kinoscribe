@@ -2,9 +2,9 @@ import { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Trash2, Languages, Download,
-  Film, Brain, FileText, ChevronDown, Mic, RefreshCw,
-  Sparkles, ArrowRightLeft, AlertCircle, Loader2, X, Check,
-  HardDriveDownload, Disc, Clock,
+  Film, Brain, BookOpen, FileText, ChevronDown, Mic, RefreshCw,
+  Upload, Sparkles, ArrowRightLeft, AlertCircle, Loader2, X, Check,
+  HardDriveDownload, Disc, Clock, TrashCw,
 } from 'lucide-react';
 import { useFilm, useTasks, useActiveTaskPolling } from '../hooks/useApi';
 import { api } from '../api/client';
@@ -86,9 +86,9 @@ export default function FilmDetailPage() {
   const [installing, setInstalling] = useState<string | null>(null);
   const [rescanning, setRescanning] = useState(false);
   const [enriching, setEnriching] = useState(false);
-  const [open, setOpen] = useState<Record<string, boolean>>({ subs: true, tracks: false, whisper: false, video: false });
+  const [sectionOpen, setSectionOpen] = useState<Record<string, boolean>>({ subs: true, tracks: false, whisper: false, video: false });
 
-  const toggle = (key: string) => setOpen(p => ({ ...p, [key]: !p[key] }));
+  const toggle = (key: string) => setSectionOpen(prev => ({ ...prev, [key]: !prev[key] }));
 
   useEffect(() => {
     if (id) {
@@ -219,7 +219,7 @@ export default function FilmDetailPage() {
           <Link to="/" className="btn-ghost !p-2"><ArrowLeft className="w-4 h-4" /></Link>
           <div className="flex-1 min-w-0">
             <h1 className="text-2xl font-bold truncate">{film.title}</h1>
-            <div className="flex items-center gap-2 text-sm text-gray-500 mt-0.5 flex-wrap">
+            <div className="flex items-center gap-2 text-sm text-gray-500 mt-0.5">
               {film.year && <span>{film.year}</span>}
               {film.director && <><span>·</span><span>de {film.director}</span></>}
               {film.genre && <><span>·</span><span>{film.genre}</span></>}
@@ -265,9 +265,9 @@ export default function FilmDetailPage() {
         {/* ─── Two-column layout ────────────────────────────────────────── */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
 
-          {/* ─── Left: Info sidebar ────────────────────────────────────── */}
+          {/* ─── Left: Info card ──────────────────────────────────────── */}
           <div className="lg:col-span-1 space-y-4">
-            <div className="glass-card p-4 space-y-0.5">
+            <div className="glass-card p-4 space-y-1">
               <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Informations</h3>
               <MetaRow label="Source" value={LANG_NAMES[film.source_language] || film.source_language.toUpperCase()} />
               <MetaRow label="Cible" value={LANG_NAMES[film.target_language] || film.target_language.toUpperCase()} />
@@ -279,7 +279,7 @@ export default function FilmDetailPage() {
               {film.imdb_id && (
                 <>
                   <MetaRow label="IMDb" value={film.imdb_id} mono />
-                  <a href={`https://www.imdb.com/title/${film.imdb_id}`} target="_blank" rel="noopener noreferrer" className="text-xs text-brand-400 hover:underline block py-0.5">Voir sur IMDb ↗</a>
+                  <a href={`https://www.imdb.com/title/${film.imdb_id}`} target="_blank" rel="noopener noreferrer" className="text-xs text-brand-400 hover:underline block mb-1">Voir sur IMDb ↗</a>
                 </>
               )}
               {film.tmdb_id && <MetaRow label="TMDB" value={film.tmdb_id} mono />}
@@ -298,11 +298,11 @@ export default function FilmDetailPage() {
               <div className="glass-card p-4">
                 <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Personnages ({film.characters.length})</h3>
                 <div className="space-y-1.5">
-                  {film.characters.map((c: Character) => (
+                  {film.characters.map(c => (
                     <div key={c.id || c.name} className="flex items-center gap-2 text-sm">
                       <span className={`w-2 h-2 rounded-full ${GENDER_COLORS[c.gender || 'unknown']?.split(' ')[0]}`} />
                       <span className="text-gray-200 font-medium">{c.name}</span>
-                      {c.description && <span className="text-gray-500 text-xs ml-auto truncate max-w-[60%]">{c.description}</span>}
+                      {c.description && <span className="text-gray-500 text-xs ml-auto truncate">{c.description}</span>}
                     </div>
                   ))}
                 </div>
@@ -319,7 +319,7 @@ export default function FilmDetailPage() {
                       <span className="text-white">{g.source_term}</span>
                       <span className="text-gray-600">→</span>
                       <span className="text-emerald-400">{g.target_term}</span>
-                      {g.notes && <span className="text-gray-500 text-xs ml-auto truncate max-w-[40%]">{g.notes}</span>}
+                      {g.notes && <span className="text-gray-500 text-xs ml-auto truncate">{g.notes}</span>}
                     </div>
                   ))}
                 </div>
@@ -328,13 +328,13 @@ export default function FilmDetailPage() {
           </div>
 
           {/* ─── Right: Main content ──────────────────────────────────── */}
-          <div className="lg:col-span-2 space-y-5">
+          <div className="lg:col-span-2 space-y-6">
 
             {/* Summary & Lore */}
             {(film.summary || lore?.lore_summary) && (
               <div className="glass-card p-5">
                 {film.summary && (
-                  <div className={lore?.lore_summary ? 'mb-4 pb-4 border-b border-gray-700/40' : ''}>
+                  <div className="mb-4">
                     <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Résumé</h3>
                     <p className="text-sm text-gray-300 whitespace-pre-line">{film.summary}</p>
                   </div>
@@ -349,7 +349,7 @@ export default function FilmDetailPage() {
             )}
 
             {/* ─── Subtitles ──────────────────────────────────────────── */}
-            <Section title="Sous-titres" icon={<FileText className="w-4 h-4" />} isOpen={open.subs} onToggle={() => toggle('subs')}>
+            <Section title="Sous-titres" icon={<FileText className="w-4 h-4" />} open={sectionOpen.subs} onToggle={() => toggle('subs')}>
               <SubtitleUploader onUpload={handleUpload} disabled={uploading} />
               {subtitles.length > 0 && (
                 <div className="mt-3 space-y-2">
@@ -382,7 +382,7 @@ export default function FilmDetailPage() {
             </Section>
 
             {/* ─── Embedded tracks ────────────────────────────────────── */}
-            <Section title="Pistes embarquées" icon={<Disc className="w-4 h-4" />} isOpen={open.tracks} onToggle={() => toggle('tracks')}>
+            <Section title="Pistes embarquées" icon={<Disc className="w-4 h-4" />} open={sectionOpen.tracks} onToggle={() => toggle('tracks')}>
               <div className="flex gap-3 mb-3">
                 <button onClick={handleLoadTracks} disabled={loadingTracks} className="btn-secondary !text-xs">
                   {loadingTracks ? <Loader2 className="w-3 h-3 animate-spin" /> : <Disc className="w-3 h-3" />} Analyser
@@ -393,7 +393,7 @@ export default function FilmDetailPage() {
                   {tracks.subtitle.length > 0 && (
                     <div>
                       <h4 className="text-xs text-gray-500 mb-1">Sous-titres intégrés</h4>
-                      {tracks.subtitle.map((t: TrackInfo, i: number) => (
+                      {tracks.subtitle.map((t, i) => (
                         <div key={i} className="text-sm text-gray-300 flex items-center gap-2 py-0.5">
                           <span className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">{t.codec}</span>
                           <span>{t.language || 'und'}</span>
@@ -408,7 +408,7 @@ export default function FilmDetailPage() {
                   {tracks.audio.length > 0 && (
                     <div>
                       <h4 className="text-xs text-gray-500 mb-1">Pistes audio</h4>
-                      {tracks.audio.map((t: TrackInfo, i: number) => (
+                      {tracks.audio.map((t, i) => (
                         <div key={i} className="text-sm text-gray-300 flex items-center gap-2 py-0.5">
                           <span className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">{t.codec}</span>
                           <span>{t.language || 'und'}</span>
@@ -422,7 +422,7 @@ export default function FilmDetailPage() {
             </Section>
 
             {/* ─── Whisper ─────────────────────────────────────────────── */}
-            <Section title="Transcription Whisper" icon={<Mic className="w-4 h-4" />} isOpen={open.whisper} onToggle={() => toggle('whisper')}>
+            <Section title="Transcription Whisper" icon={<Mic className="w-4 h-4" />} open={sectionOpen.whisper} onToggle={() => toggle('whisper')}>
               <div className="flex items-center gap-3">
                 <select value={whisperModel} onChange={e => setWhisperModel(e.target.value)} className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm">
                   <option value="tiny">Tiny (rapide)</option>
@@ -440,7 +440,7 @@ export default function FilmDetailPage() {
 
             {/* ─── Video player ────────────────────────────────────────── */}
             {film.video_path && (
-              <Section title="Lecteur vidéo" icon={<Film className="w-4 h-4" />} isOpen={open.video} onToggle={() => toggle('video')}>
+              <Section title="Lecteur vidéo" icon={<Film className="w-4 h-4" />} open={sectionOpen.video} onToggle={() => toggle('video')}>
                 <video controls className="w-full rounded-lg bg-black" style={{ maxHeight: '40vh' }}>
                   <source src={api.getFilmVideoUrl(film.id)} type="video/mp4" />
                   Votre navigateur ne supporte pas la lecture vidéo.
@@ -452,7 +452,7 @@ export default function FilmDetailPage() {
             {/* ─── Work files ──────────────────────────────────────────── */}
             <div className="flex items-center gap-3">
               <button onClick={handleCleanWork} className="btn-ghost !text-xs text-red-400 hover:text-red-300">
-                <Trash2 className="w-3 h-3" /> Nettoyer les fichiers de travail
+                <TrashCw className="w-3 h-3" /> Nettoyer les fichiers de travail
               </button>
             </div>
           </div>
@@ -501,15 +501,15 @@ function ConfirmDlg() {
 
 // ─── Layout helpers ──────────────────────────────────────────────────────
 
-function Section({ title, icon, isOpen, onToggle, children }: { title: string; icon: React.ReactNode; isOpen: boolean; onToggle: () => void; children: React.ReactNode }) {
+function Section({ title, icon, open, onToggle, children }: { title: string; icon: React.ReactNode; open: boolean; onToggle: () => void; children: React.ReactNode }) {
   return (
     <div className="glass-card p-5">
       <button onClick={onToggle} className="flex items-center gap-2 w-full text-left group">
         <span className="text-brand-400">{icon}</span>
         <h3 className="text-sm font-semibold text-gray-200 flex-1">{title}</h3>
-        <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+        <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
-      {isOpen && <div className="mt-4">{children}</div>}
+      {open && <div className="mt-4">{children}</div>}
     </div>
   );
 }

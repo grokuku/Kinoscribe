@@ -127,6 +127,23 @@ DEFAULTS: List[dict] = [
         "input_type": "text",
         "category": "security",
     },
+    # ── Whisper ───────────────────────────────────
+    {
+        "key": "whisper_model",
+        "default": "medium",
+        "description": "Taille du modèle Whisper (tiny/base/small/medium/large)",
+        "input_type": "select",
+        "options": "tiny,base,small,medium,large,large-v3",
+        "category": "translation",
+    },
+    {
+        "key": "whisperx_enabled",
+        "default": "false",
+        "description": "Utiliser WhisperX pour l'alignement forcé (timestamps plus précis, nécessite pip install whisperx)",
+        "input_type": "select",
+        "options": "true,false",
+        "category": "translation",
+    },
     # ── TMDB ───────────────────────────────────────
     {
         "key": "tmdb_api_key",

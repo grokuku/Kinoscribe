@@ -22,6 +22,9 @@ asyncssh
 # Whisper transcription
 faster-whisper
 
+# Optional: WhisperX for precise word-level timestamp alignment
+# whisperx  # Uncomment to enable (requires additional dependencies)
+
 # Movie metadata (no API key needed)
 cinemagoer
 

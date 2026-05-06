@@ -2,10 +2,14 @@
 Whisper service — audio transcription and subtitle synchronization.
 
 Uses faster-whisper (CTranslate2-based) for efficient CPU inference.
+Optional WhisperX integration for word-level forced alignment (much more
+accurate timestamps when available).
+
 - transcribe_video(): Generate subtitles from audio
 - sync_with_whisper(): Re-align existing subtitle timestamps using Whisper
 
 Requirements: pip install faster-whisper
+Optional: pip install whisperx (for improved timestamp accuracy)
 """
 
 import os
@@ -39,6 +43,15 @@ def _check_whisper_available() -> bool:
         return False
 
 
+def _check_whisperx_available() -> bool:
+    """Check if whisperx is installed for word-level alignment."""
+    try:
+        import whisperx
+        return True
+    except ImportError:
+        return False
+
+
 def _extract_audio(video_path: str, output_dir: str) -> str:
     """Extract audio from video file using ffmpeg."""
     audio_path = os.path.join(output_dir, "audio.wav")
@@ -66,9 +79,11 @@ def _whisper_transcribe(
     audio_path: str,
     language: Optional[str] = None,
     model_size: str = "medium",
+    use_whisperx: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Transcribe audio using faster-whisper.
+    Optionally improve timestamps with WhisperX forced alignment.
     Returns list of segments: [{start, end, text}, ...]
     """
     from faster_whisper import WhisperModel
@@ -100,7 +115,97 @@ def _whisper_transcribe(
 
     logger.info("Whisper transcription done", language=info.language,
                 duration=info.duration, segments=len(results))
+
+    # Optional WhisperX alignment for accurate word-level timestamps
+    if use_whisperx:
+        results = _whisperx_align_segments(
+            audio_path, results,
+            language=info.language or language or "en",
+            model_size=model_size,
+        )
+
     return results
+
+
+def _whisperx_align_segments(
+    audio_path: str,
+    segments: List[Dict[str, Any]],
+    language: str = "en",
+    model_size: str = "medium",
+) -> List[Dict[str, Any]]:
+    """
+    Improve Whisper segment timestamps using WhisperX forced alignment.
+
+    WhisperX runs wav2vec2 forced alignment on top of Whisper's output,
+    producing word-level timestamps that are ~10x more accurate.
+
+    Falls back to original segments if whisperx is not available or fails.
+    """
+    if not _check_whisperx_available():
+        logger.debug("WhisperX not available, using raw Whisper timestamps")
+        return segments
+
+    try:
+        import whisperx
+        import gc
+
+        logger.info("Running WhisperX alignment", model=model_size, language=language)
+
+        # 1. Load alignment model
+        align_model, metadata = whisperx.load_align_model(
+            language_code=language if language != "auto" else "en",
+            device="cpu",
+        )
+
+        # 2. Convert segments to WhisperX format
+        word_segments = []
+        for seg in segments:
+            word_segments.append({
+                "start": seg["start"],
+                "end": seg["end"],
+                "text": seg["text"],
+            })
+
+        # 3. Align
+        result = whisperx.align(
+            word_segments, align_model, metadata, audio_path,
+            device="cpu",
+            return_char_alignments=False,
+        )
+
+        # 4. Extract aligned segments
+        aligned_segments = []
+        for seg in result["segments"]:
+            words = seg.get("words", [])
+            if words:
+                aligned_segments.append({
+                    "start": words[0]["start"] if "start" in words[0] else seg["start"],
+                    "end": words[-1]["end"] if "end" in words[-1] else seg["end"],
+                    "text": seg["text"].strip(),
+                })
+            else:
+                aligned_segments.append({
+                    "start": seg["start"],
+                    "end": seg["end"],
+                    "text": seg["text"].strip(),
+                })
+
+        # Cleanup to free memory
+        del align_model
+        gc.collect()
+
+        if len(aligned_segments) == len(segments):
+            logger.info("WhisperX alignment complete",
+                       original=len(segments), aligned=len(aligned_segments))
+            return aligned_segments
+        else:
+            logger.warning("WhisperX alignment mismatch",
+                         original=len(segments), aligned=len(aligned_segments))
+            return segments
+
+    except Exception as e:
+        logger.warning("WhisperX alignment failed, falling back to raw timestamps", error=str(e))
+        return segments
 
 
 def _format_srt_time(seconds: float) -> str:
@@ -206,6 +311,7 @@ async def transcribe_video(
     film_id: str,
     language: Optional[str] = None,
     model_size: str = "medium",
+    use_whisperx: bool = False,
 ) -> Dict[str, Any]:
     """
     Transcribe a video file using Whisper and save as SRT.
@@ -232,7 +338,7 @@ async def transcribe_video(
 
     # Transcribe (run in thread — this is CPU-bound and blocks the event loop)
     segments = await asyncio.to_thread(
-        _whisper_transcribe, audio_path, language, model_size
+        _whisper_transcribe, audio_path, language, model_size, use_whisperx
     )
     if not segments:
         raise RuntimeError("Whisper produced no output")
@@ -270,6 +376,7 @@ async def sync_with_whisper(
     subtitle_path: str,
     film_id: str,
     model_size: str = "medium",
+    use_whisperx: bool = False,
 ) -> Dict[str, Any]:
     """
     Re-sync existing subtitles using Whisper timing.
@@ -291,7 +398,7 @@ async def sync_with_whisper(
     # Extract audio and transcribe (run in thread to avoid blocking)
     audio_path = await asyncio.to_thread(_extract_audio, video_path, get_audio_dir(film_id))
     whisper_segments = await asyncio.to_thread(
-        _whisper_transcribe, audio_path, model_size=model_size
+        _whisper_transcribe, audio_path, model_size=model_size, use_whisperx=use_whisperx
     )
 
     # Parse and align (CPU-light, safe to run directly)

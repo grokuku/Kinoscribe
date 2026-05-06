@@ -76,7 +76,8 @@ export type TaskType =
   | 'transcription'
   | 'extract_subs'
   | 'extract_audio'
-  | 'analyze';
+  | 'analyze'
+  | 'pipeline';
 
 export interface Task {
   id: string;
@@ -147,4 +148,11 @@ export interface WorkFiles {
   whisper: WorkFile[];
   uploads: WorkFile[];
   sync: WorkFile[];
+}
+
+export interface TranslationVersion {
+  filename: string;
+  path: string;
+  size: number;
+  created: string;
 }

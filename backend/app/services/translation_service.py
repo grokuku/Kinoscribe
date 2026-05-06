@@ -41,13 +41,16 @@ class TranslationService:
         temperature: float = 0.3,
         think: Optional[bool] = False,
         db_session: Optional[AsyncSession] = None,
+        ref_tracks: Optional[dict[str, dict[int, str]]] = None,
     ) -> List[SubtitleLine]:
         """
         Full translation pipeline with sliding window.
         Returns translated SubtitleLine objects.
 
         Args:
-            think: Enable reasoning mode. False = draft (fast), True = refine (slow, thoughtful).
+            think: Enable reasoning mode. False = draft (fast), True = refine (slow).
+            ref_tracks: Optional reference translations from other subtitle tracks.
+                        Format: {lang_code: {line_index: text}}
         """
         target_lang = film.target_language
         source_lang = task.source_language or film.source_language
@@ -90,6 +93,7 @@ class TranslationService:
                             glossary_context=glossary_context,
                             lore_summary=task.lore_summary or "",
                             think=think,
+                            ref_tracks=ref_tracks,
                         )
                         translated.extend(translated_batch)
                         break
@@ -145,6 +149,8 @@ class TranslationService:
         glossary_context: str,
         lore_summary: str,
         think: Optional[bool] = False,
+        ref_tracks: Optional[dict[str, dict[int, str]]] = None,
+        source_language: str = "en",
     ) -> List[SubtitleLine]:
         """Translate a batch of lines with full context injection."""
 
@@ -163,32 +169,55 @@ class TranslationService:
         )
 
         system_msg = (
-            "You are an expert film subtitle translator specializing in cinematic localization.\n"
-            "RULES:\n"
-            "1. Maintain the original timing indices exactly.\n"
-            "2. Preserve tone, personality, and register of each character.\n"
-            "3. Respect character genders for grammatical agreement in the target language.\n"
-            "4. Use the glossary for consistent translation of proper nouns and slang.\n"
-            "5. Keep subtitle text concise — target under 25 characters per second.\n"
-            "6. Return ONLY a JSON object with a 'lines' key containing a list of "
-            "{'index': int, 'text': str} objects.\n"
-            "7. Do NOT include any explanation or commentary.\n"
-            "8. If a source line is empty or contains only non-translatable content, "
-            "return it with an empty 'text' value."
+            "You are an expert film subtitle translator specializing in French localization.\n"
+            "Translate the following English dialogue into idiomatic, natural French.\n\n"
+            "RÈGLES ESSENTIELLES :\n"
+            "1. TOUT le texte doit être en français. Ne JAMAIS laisser de l'anglais,\n"
+            "   sauf les noms propres de personnages ou de lieux.\n"
+            "2. Les expressions idiomatiques doivent être traduites par leur ÉQUIVALENT\n"
+            "   naturel en français, PAS mot à mot.\n"
+            "   Ex: 'break a leg' → 'merde !', PAS 'casse une jambe'.\n"
+            "   Ex: 'it's raining cats and dogs' → 'il pleut des cordes', PAS littéral.\n"
+            "3. Si tu ne connais pas l'équivalent exact d'une expression, adapte le SENS\n"
+            "   de façon naturelle — ne fais JAMAIS de traduction littérale.\n"
+            "4. Préserve le ton, la personnalité et le registre de chaque personnage.\n"
+            "   Le vouvoiement/tutoiement doit correspondre aux relations entre personnages.\n"
+            "5. Respecte les genres des personnages pour l'accord grammatical et les adjectifs.\n"
+            "6. Utilise le glossaire pour la cohérence des termes récurrents.\n"
+            "7. Chaque sous-titre doit être concis — cible < 25 car/sec.\n"
+            "8. Réponds UNIQUEMENT en JSON : {\"lines\": [{\"index\": int, \"text\": str}]}.\n"
+            "9. Les lignes vides (sans dialogue) → \"text\": \"\"."
         )
 
-        user_parts = [f"Translate the following subtitle lines from {source_language.upper()} to {target_language.upper()}.\n"]
+        user_parts = []
 
         if lore_summary:
-            user_parts.append(f"STORY CONTEXT:\n{lore_summary}\n")
+            user_parts.append(f"CONTEXTE DE L'HISTOIRE :\n{lore_summary}\n")
         if char_context:
-            user_parts.append(f"CHARACTER PROFILES:\n{char_context}\n")
+            user_parts.append(f"PROFILS DES PERSONNAGES :\n{char_context}\n")
         if glossary_context:
-            user_parts.append(f"GLOSSARY:\n{glossary_context}\n")
+            user_parts.append(f"GLOSSAIRE :\n{glossary_context}\n")
+        if ref_tracks:
+            # Inject translations from other subtitle tracks as reference
+            # Limit to 2 languages max to keep token budget reasonable
+            ref_parts = []
+            for lang, idx_map in list(ref_tracks.items())[:2]:
+                lang_refs = []
+                for line in batch:
+                    ref_text = idx_map.get(line.index, "")
+                    if ref_text.strip():
+                        lang_refs.append(f"[{line.index}] {lang.upper()}: {ref_text}")
+                if lang_refs:
+                    ref_parts.extend(lang_refs)
+            if ref_parts:
+                user_parts.append(
+                    "TRADUCTIONS DE RÉFÉRENCE (autres langues, pour contexte — ne pas copier) :\n" +
+                    "\n".join(ref_parts) + "\n"
+                )
         if ctx_text:
-            user_parts.append(f"PREVIOUS TRANSLATED LINES (for consistency):\n{ctx_text}\n")
+            user_parts.append(f"LIGNES DÉJÀ TRADUITES (pour cohérence) :\n{ctx_text}\n")
 
-        user_parts.append(f"LINES TO TRANSLATE:\n{lines_text}")
+        user_parts.append(f"TRADUIRE DU {source_language.upper()} VERS LE {target_language.upper()} :\n{lines_text}")
 
         messages = [
             Message(role="system", content=system_msg),
@@ -262,27 +291,32 @@ class TranslationService:
             source_lang = task.source_language or film.source_language
 
             system_msg = (
-                "You are an expert film subtitle editor. "
-                "Review and improve the following translated subtitles.\n"
-                "RULES:\n"
-                "1. Improve natural phrasing and fluency in the target language.\n"
-                "2. Ensure each subtitle is concise (under 25 characters per second).\n"
-                "3. Preserve the speaker's personality and tone.\n"
-                "4. Maintain timing indices exactly.\n"
-                "5. Return ONLY a JSON object with a 'lines' key containing {{'index': int, 'text': str}}.\n"
-                "6. Do NOT include any explanation or commentary."
+                "Tu es un éditeur expert de sous-titres français. "
+                "Révise et améliore la traduction ci-dessous.\n\n"
+                "VÉRIFIE CHAQUE LIGNE POUR :\n"
+                "1. RESTES D'ANGLAIS — le moindre mot en anglais est INACCEPTABLE.\n"
+                "   Remplace-le par du français naturel.\n"
+                "2. EXPRESSIONS IDIOMATIQUES — vérifie qu'aucune expression n'est\n"
+                "   traduite littéralement. Remplace par l'équivalent naturel.\n"
+                "3. FLUIDITÉ — le phrasé doit être naturel, comme parlé par un natif.\n"
+                "   Simplifie les tournures trop complexes ou maladroites.\n"
+                "4. CONCISION — chaque ligne doit respecter ~25 car/sec.\n"
+                "   Si une ligne est trop longue, reformule plus court sans perdre le sens.\n"
+                "5. COHÉRENCE — respecte la personnalité des personnages et le glossaire.\n"
+                "6. Réponds UNIQUEMENT en JSON : {\"lines\": [{\"index\": int, \"text\": str}]}.\n"
+                "7. Ne mets AUCUN commentaire."
             )
 
             user_parts = [
-                f"Review and improve these subtitles (from {source_lang.upper()} to {film.target_language.upper()} ).\n"
+                f"Révise ces sous-titres (traduits de {source_lang.upper()} vers {film.target_language.upper()}).\n"
             ]
             if task.lore_summary:
-                user_parts.append(f"STORY CONTEXT:\n{task.lore_summary}\n")
+                user_parts.append(f"CONTEXTE DE L'HISTOIRE :\n{task.lore_summary}\n")
             if char_context:
-                user_parts.append(f"CHARACTER PROFILES:\n{char_context}\n")
+                user_parts.append(f"PROFILS DES PERSONNAGES :\n{char_context}\n")
             if glossary_context:
-                user_parts.append(f"GLOSSARY:\n{glossary_context}\n")
-            user_parts.append(f"SUBTITLES TO REFINE:\n{lines_text}")
+                user_parts.append(f"GLOSSAIRE :\n{glossary_context}\n")
+            user_parts.append(f"SOUS-TITRES À RÉVISER :\n{lines_text}")
 
             messages = [
                 Message(role="system", content=system_msg),

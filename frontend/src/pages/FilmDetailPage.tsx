@@ -4,13 +4,13 @@ import {
   ArrowLeft, Trash2, Languages, Download,
   Film, Brain, FileText, ChevronDown, Mic, RefreshCw,
   Sparkles, ArrowRightLeft, AlertCircle, Loader2, X, Check,
-  HardDriveDownload, Disc, Clock,
+  HardDriveDownload, Disc, Clock, Play,
 } from 'lucide-react';
 import { useFilm, useTasks, useActiveTaskPolling } from '../hooks/useApi';
 import { api } from '../api/client';
 import { StatusBadge, TaskProgressBar } from '../components/TaskStatus';
 import SubtitleUploader from '../components/SubtitleUploader';
-import type { Task, Character, GlossaryEntry, ExistingSubtitle, TrackInfo } from '../types';
+import type { Task, Character, GlossaryEntry, ExistingSubtitle, TrackInfo, TranslationVersion } from '../types';
 
 // ─── Toast / Confirm system ──────────────────────────────────────────────
 
@@ -60,6 +60,7 @@ const TASK_TYPE_LABELS: Record<string, string> = {
   translation: 'Traduction', improve: 'Amélioration', sync: 'Synchronisation',
   transcription: 'Transcription', extract_subs: 'Extraction sous-titres',
   extract_audio: 'Extraction audio', analyze: 'Analyse contextuelle',
+  pipeline: 'Pipeline complet',
 };
 
 // ─── Main Page ───────────────────────────────────────────────────────────
@@ -86,7 +87,10 @@ export default function FilmDetailPage() {
   const [installing, setInstalling] = useState<string | null>(null);
   const [rescanning, setRescanning] = useState(false);
   const [enriching, setEnriching] = useState(false);
-  const [open, setOpen] = useState<Record<string, boolean>>({ subs: true, tracks: false, whisper: false, video: false });
+  const [translations, setTranslations] = useState<TranslationVersion[]>([]);
+  const [open, setOpen] = useState<Record<string, boolean>>({ subs: true, tracks: false, whisper: false, video: false, pipeline: false, translations: false });
+  const [pipelineDialog, setPipelineDialog] = useState(false);
+  const [pipelineSteps, setPipelineSteps] = useState({ extract: true, transcribe: true, analyze: true, translate: true, install: true });
 
   const toggle = (key: string) => setOpen(p => ({ ...p, [key]: !p[key] }));
 
@@ -95,6 +99,7 @@ export default function FilmDetailPage() {
       api.getFilmGlossary(id).then(setGlossary).catch(() => {});
       api.getFilmLore(id).then(setLore).catch(() => {});
       api.getFilmSubtitles(id).then(setSubtitles).catch(() => {});
+      api.listTranslations(id).then(r => setTranslations(r.versions)).catch(() => {});
     }
   }, [id, filmTasks?.length]);
 
@@ -196,6 +201,37 @@ export default function FilmDetailPage() {
     try { const r = await api.installSubtitle(taskId); toast.success(`Installé : ${r.destination}`); } catch (e: any) { toast.error('Erreur : ' + e.message); } finally { setInstalling(null); }
   };
 
+  const handlePipeline = async () => {
+    setPipelineDialog(true);
+  };
+
+  const handlePipelineLaunch = async () => {
+    if (!film || !id) return;
+    setPipelineDialog(false);
+    setStarting('pipeline');
+    try {
+      const task = await api.pipelineFilm(id);
+      await api.startTranslation(task.id, { pipeline_steps: pipelineSteps });
+      refreshTasks();
+      toast.info('Pipeline lancé');
+      // Reload translations after pipeline completes (poll)
+      setTimeout(() => api.listTranslations(id).then(r => setTranslations(r.versions)).catch(() => {}), 5000);
+      setTimeout(() => api.listTranslations(id).then(r => setTranslations(r.versions)).catch(() => {}), 30000);
+    } catch (e: any) { toast.error('Erreur : ' + e.message); }
+    finally { setStarting(null); }
+  };
+
+  const handleInstallVersion = async (path: string) => {
+    if (!id) return;
+    if (!await confirm('Installer cette version dans le dossier du film ?')) return;
+    setInstalling(path);
+    try {
+      const r = await api.installTranslation(id, path);
+      toast.success(`Installé : ${r.destination}${r.backup ? ` (backup: ${r.backup})` : ''}`);
+    } catch (e: any) { toast.error('Erreur : ' + e.message); }
+    finally { setInstalling(null); }
+  };
+
   const handleDelete = async () => {
     if (!await confirm('Supprimer ce film ?')) return;
     await api.deleteFilm(film!.id); navigate('/');
@@ -212,6 +248,13 @@ export default function FilmDetailPage() {
     <>
       <ToastBar />
       <ConfirmDlg />
+      <PipelineDialog
+        open={pipelineDialog}
+        onClose={() => setPipelineDialog(false)}
+        onLaunch={handlePipelineLaunch}
+        steps={pipelineSteps}
+        setStep={(k, v) => setPipelineSteps(s => ({ ...s, [k]: v }))}
+      />
       <div className="page-container max-w-5xl">
 
         {/* ─── Header ─────────────────────────────────────────────────── */}
@@ -381,6 +424,51 @@ export default function FilmDetailPage() {
               )}
             </Section>
 
+            {/* ─── Pipeline (all-in-one) ──────────────────────────── */}
+            <Section title="Pipeline" icon={<Play className="w-4 h-4" />} isOpen={open.pipeline} onToggle={() => toggle('pipeline')}>
+              <p className="text-xs text-gray-400 mb-3">Extraction → Transcription → Analyse → Traduction → Installation automatique</p>
+              <button
+                onClick={handlePipeline}
+                disabled={starting !== null || !film.video_path}
+                className="btn-primary !text-sm w-full"
+                title={!film.video_path ? 'Aucune vidéo détectée — lancez un scan d\'abord' : ''}
+              >
+                <Play className="w-4 h-4" />
+                {starting !== null ? 'Lancement…' : 'Pipeline complet'}
+              </button>
+            </Section>
+
+            {/* ─── Traductions (versionnées) ──────────────────────── */}
+            <Section title="Traductions" icon={<Download className="w-4 h-4" />} isOpen={open.translations} onToggle={() => toggle('translations')}>
+              {translations.length === 0 ? (
+                <p className="text-xs text-gray-500 italic">Aucune traduction disponible. Lancez une traduction d'abord.</p>
+              ) : (
+                <div className="space-y-2 max-h-64 overflow-y-auto">
+                  {translations.map(v => (
+                    <div key={v.path} className="flex items-center gap-3 bg-gray-800/40 rounded-lg px-3 py-2 group">
+                      <Download className="w-4 h-4 text-brand-400 shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm text-gray-200 truncate">{v.filename}</p>
+                        <p className="text-xs text-gray-500">
+                          {v.created} · {(v.size / 1024).toFixed(1)} KB
+                          {v.filename.includes('.pipeline.') && <span className="ml-1 text-brand-400">(pipeline)</span>}
+                          {v.filename.includes('.improved.') && <span className="ml-1 text-violet-400">(amélioré)</span>}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => handleInstallVersion(v.path)}
+                        disabled={installing !== null}
+                        className="btn-ghost !text-xs !p-1.5 text-emerald-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                        title={`Installer ${v.filename} dans le dossier du film`}
+                      >
+                        <HardDriveDownload className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Section>
+
             {/* ─── Embedded tracks ────────────────────────────────────── */}
             <Section title="Pistes embarquées" icon={<Disc className="w-4 h-4" />} isOpen={open.tracks} onToggle={() => toggle('tracks')}>
               <div className="flex gap-3 mb-3">
@@ -479,6 +567,57 @@ function ToastBar() {
           <button onClick={() => { toastState = toastState.filter(x => x.id !== t.id); toastListeners.forEach(l => l([...toastState])); }} className="opacity-70 hover:opacity-100"><X className="w-3.5 h-3.5" /></button>
         </div>
       ))}
+    </div>
+  );
+}
+
+function PipelineDialog({ open, onClose, onLaunch, steps, setStep }: {
+  open: boolean; onClose: () => void; onLaunch: () => void;
+  steps: Record<string, boolean>;
+  setStep: (key: string, v: boolean) => void;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  const STEP_LABELS: Record<string, string> = {
+    extract: 'Extraire les sous-titres intégrés',
+    transcribe: 'Transcrire avec Whisper (si pas de sous-titre)',
+    analyze: 'Analyser le contexte (personnages, glossaire, résumé)',
+    translate: 'Traduire (draft + refine)',
+    install: 'Installer dans le dossier source (.fre.srt)',
+  };
+
+  const stepsOrder = ['extract', 'transcribe', 'analyze', 'translate', 'install'];
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70">
+      <div className="bg-gray-800 rounded-xl p-6 max-w-md w-full mx-4 shadow-2xl border border-white/10">
+        <h3 className="text-white text-lg font-bold mb-1">Configuration du pipeline</h3>
+        <p className="text-gray-400 text-xs mb-5">Choisissez les étapes à exécuter :</p>
+        <div className="space-y-3 mb-6">
+          {stepsOrder.map(key => (
+            <label key={key} className="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={steps[key]}
+                onChange={e => setStep(key, e.target.checked)}
+                className="w-4 h-4 rounded border-gray-600 bg-gray-700 text-brand-500 focus:ring-brand-500"
+              />
+              <span className="text-sm text-gray-300">{STEP_LABELS[key]}</span>
+            </label>
+          ))}
+        </div>
+        <div className="flex gap-3 justify-end">
+          <button onClick={onClose} className="px-4 py-2 text-sm rounded-lg bg-gray-700 text-gray-300 hover:bg-gray-600 transition">Annuler</button>
+          <button onClick={onLaunch} className="px-4 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600 transition">Lancer</button>
+        </div>
+      </div>
     </div>
   );
 }

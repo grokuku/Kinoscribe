@@ -213,6 +213,57 @@ class ContextService:
             logger.error("Glossary build failed", error=str(e))
             return []
 
+    async def build_idiom_glossary(
+        self,
+        parsed_subtitle: ParsedSubtitle,
+        target_language: str,
+        source_language: str = "en",
+    ) -> List[dict]:
+        """
+        Detect idiomatic/figurative expressions and provide their natural
+        equivalent in the target language.
+
+        This is a specialized LLM call focused ONLY on idioms, metaphors,
+        and culturally-specific expressions that should NOT be translated literally.
+        """
+        sample = self._build_dialogue_sample(parsed_subtitle, max_lines=120)
+
+        messages = [
+            Message(
+                role="system",
+                content=(
+                    f"Tu es un traductologue expert. "
+                    f"Identifie les EXPRESSIONS IDIOMATIQUES, figurées, métaphoriques ou culturelles "
+                    f"dans le dialogue ci-dessous. Pour chaque expression détectée, donne son "
+                    f"ÉQUIVALENT NATUREL en {target_language} — pas une traduction littérale.\n\n"
+                    f"ATTENTION : ne liste QUE les vraies expressions idiomatiques. "
+                    f"Ne traduit pas les phrases normales.\n\n"
+                    f"Réponds UNIQUEMENT en JSON : "
+                    f"{{\"idioms\": [{{\"source\": str, \"target\": str, \"notes\": str}}]}}"
+                ),
+            ),
+            Message(
+                role="user",
+                content=(
+                    f"Dialogue en {source_language.upper()} :\n{sample}\n\n"
+                    f"Identifie les expressions idiomatiques et donne leur équivalent en {target_language}."
+                ),
+            ),
+        ]
+
+        try:
+            raw = await self.llm.chat(messages, format_json=True, temperature=0.2, think=True)
+            idioms = self._parse_json_response(raw).get("idioms", [])
+            # Tag idiom entries for clarity
+            for entry in idioms:
+                if not entry.get("notes"):
+                    entry["notes"] = "expression idiomatique"
+            logger.info("Idiom glossary built", count=len(idioms))
+            return idioms
+        except Exception as e:
+            logger.error("Idiom glossary build failed", error=str(e))
+            return []
+
     # ─── Helpers ─────────────────────────────────────────────────────────
 
     def _build_dialogue_sample(self, parsed: ParsedSubtitle, max_lines: int = 80) -> str:

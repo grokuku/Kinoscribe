@@ -5,6 +5,7 @@ Translation task routes: start, monitor, download.
 import os
 import asyncio
 from typing import List
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy import select
@@ -169,9 +170,12 @@ async def translate_existing_subtitle(
 @router.post("/{task_id}/start", response_model=TaskProgressOut)
 async def start_translation(
     task_id: str,
+    body: dict = {},
     session: AsyncSession = Depends(get_session),
 ):
-    """Kick off the workflow for a task (translation, improve, sync, etc.)."""
+    """Kick off the workflow for a task (translation, improve, sync, pipeline).
+    Optional body for pipeline: {"pipeline_steps": {"extract": true, "transcribe": true, ...}}
+    """
     task = await session.get(TranslationTask, task_id)
     if not task:
         raise HTTPException(404, "Task not found")
@@ -188,6 +192,11 @@ async def start_translation(
         task.status = "analyzing_context"
         await session.commit()
         start_task(task_id, _run_improve_workflow(task_id))
+    elif task.task_type == "pipeline":
+        task.status = "extracting"
+        await session.commit()
+        steps = body.get("pipeline_steps", {}) if body else {}
+        start_task(task_id, _run_pipeline_workflow(task_id, steps))
     else:
         # Default: translation workflow
         task.status = TaskStatusEnum.analyzing_context
@@ -387,6 +396,19 @@ async def _run_translation_workflow(task_id: str):
 
             # Build glossary
             glossary_data = await ctx.build_glossary(parsed, film.target_language)
+
+            # ── Idiom detection ───────────────────────────────────
+            idiom_data = await ctx.build_idiom_glossary(
+                parsed, film.target_language,
+                source_language=task.source_language or film.source_language or "en",
+            )
+            # Merge idiom entries into glossary (avoid duplicates by source_term)
+            existing_terms = {e.get("source", "").lower() for e in glossary_data}
+            for entry in idiom_data:
+                if entry.get("source", "").lower() not in existing_terms:
+                    glossary_data.append(entry)
+                    existing_terms.add(entry["source"].lower())
+
             for entry in glossary_data:
                 g = GlossaryEntry(
                     film_id=film.id,
@@ -397,6 +419,47 @@ async def _run_translation_workflow(task_id: str):
                 session.add(g)
             await session.commit()
             await session.refresh(film)
+
+            # ── Multi-language reference tracks ───────────────────
+            ref_tracks = None
+            try:
+                from app.api.films import _list_film_subtitles_raw
+                from app.services.scanner_service import parse_subtitle_filename
+
+                raw_subs = await _list_film_subtitles_raw(film.id, session)
+                source_lang_code = (task.source_language or film.source_language or "en").lower()
+
+                # Filter: non-source, non-SDH subtitle tracks
+                candidate_tracks = []
+                for sub_info in raw_subs:
+                    lang = (sub_info.get("language") or "").lower()
+                    if not lang or lang == source_lang_code:
+                        continue
+                    # Skip tracks that look like SDH (often have "sdh" in filename)
+                    filename_lower = sub_info.get("filename", "").lower()
+                    if "sdh" in filename_lower or "hi" in filename_lower:
+                        continue
+                    candidate_tracks.append((lang, sub_info["path"]))
+
+                if candidate_tracks:
+                    # Parse up to 2 reference tracks
+                    ref_tracks = {}
+                    for lang, track_path in candidate_tracks[:2]:
+                        try:
+                            ref_parsed = sub_svc.parse_file(track_path)
+                            idx_map = {}
+                            for line in ref_parsed.lines:
+                                if not line.is_empty:
+                                    idx_map[line.index] = line.text
+                            if idx_map:
+                                ref_tracks[lang] = idx_map
+                                logger.info("Reference track loaded",
+                                           film_id=film.id, lang=lang, lines=len(idx_map))
+                        except Exception as e:
+                            logger.warning("Failed to parse reference track",
+                                         film_id=film.id, lang=lang, path=track_path, error=str(e))
+            except Exception as e:
+                logger.warning("Reference track discovery failed", film_id=film.id, error=str(e))
 
             # ── Phase 3: Translation ────────────────────────────────
             task.status = TaskStatusEnum.translating
@@ -410,6 +473,7 @@ async def _run_translation_workflow(task_id: str):
                 temperature=temperature,
                 think=draft_think,
                 db_session=session,
+                ref_tracks=ref_tracks,
             )
 
             # ── Phase 4: Refine pass (optional) ─────────────────────
@@ -433,14 +497,15 @@ async def _run_translation_workflow(task_id: str):
                     db_session=session,
                 )
 
-            # ── Phase 5: Write output ───────────────────────────────
+            # ── Phase 5: Write output (versioned) ────────────────
             from app.services.workdir import output_dir as get_output_dir
             out_dir = get_output_dir(film.id)
             base_name = os.path.splitext(task.source_filename)[0]
-            output_path = os.path.join(out_dir, f"{base_name}.{film.target_language}.srt")
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+            output_path = os.path.join(out_dir, f"{base_name}.{film.target_language}.{ts}.srt")
 
             sub_svc.write_srt(translated_lines, output_path)
-            task.target_filename = f"{base_name}.{film.target_language}.srt"
+            task.target_filename = f"{base_name}.{film.target_language}.{ts}.srt"
             task.target_path = output_path
 
             task.status = TaskStatusEnum.completed
@@ -452,6 +517,7 @@ async def _run_translation_workflow(task_id: str):
                 task_id=task_id,
                 output=output_path,
                 lines=len(translated_lines),
+                ref_langs=list(ref_tracks.keys()) if ref_tracks else None,
             )
 
         except Exception as e:
@@ -530,6 +596,58 @@ async def _run_improve_workflow(task_id: str):
             film.lore_summary = lore
             await session.commit()
 
+            # Build idiom glossary for this film
+            idiom_data = await ctx.build_idiom_glossary(
+                parsed, film.target_language,
+                source_language=task.source_language or film.source_language or "en",
+            )
+            existing_terms = set()
+            existing_glossary = await session.execute(
+                select(GlossaryEntry).where(GlossaryEntry.film_id == film.id)
+            )
+            for eg in existing_glossary.scalars().all():
+                existing_terms.add(eg.source_term.lower())
+            for entry in idiom_data:
+                if entry.get("source", "").lower() not in existing_terms:
+                    g = GlossaryEntry(
+                        film_id=film.id,
+                        source_term=entry["source"],
+                        target_term=entry.get("target", ""),
+                        notes=entry.get("notes", "expression idiomatique"),
+                    )
+                    session.add(g)
+                    existing_terms.add(entry["source"].lower())
+            await session.commit()
+            await session.refresh(film)
+
+            # ── Multi-language reference tracks ───────────────────
+            ref_tracks = None
+            try:
+                from app.api.films import _list_film_subtitles_raw
+                raw_subs = await _list_film_subtitles_raw(film.id, session)
+                source_lang_code = (task.source_language or film.source_language or "en").lower()
+                candidate_tracks = []
+                for sub_info in raw_subs:
+                    lang = (sub_info.get("language") or "").lower()
+                    if not lang or lang == source_lang_code:
+                        continue
+                    filename_lower = sub_info.get("filename", "").lower()
+                    if "sdh" in filename_lower or "hi" in filename_lower:
+                        continue
+                    candidate_tracks.append((lang, sub_info["path"]))
+                if candidate_tracks:
+                    ref_tracks = {}
+                    for lang, track_path in candidate_tracks[:2]:
+                        try:
+                            ref_parsed = sub_svc.parse_file(track_path)
+                            idx_map = {l.index: l.text for l in ref_parsed.lines if not l.is_empty}
+                            if idx_map:
+                                ref_tracks[lang] = idx_map
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
             # Translate (improve mode uses the source subtitle as both source and reference)
             task.status = TaskStatusEnum.translating
             await session.commit()
@@ -541,14 +659,15 @@ async def _run_improve_workflow(task_id: str):
                 temperature=temperature,
                 think=refine_think,
                 db_session=session,
+                ref_tracks=ref_tracks,
             )
 
-            # Write output
+            # Write output (versioned)
             from app.services.workdir import output_dir as get_output_dir
             out_dir = get_output_dir(film.id)
             base_name = os.path.splitext(task.source_filename)[0]
-            # Add .improved suffix to distinguish from original translation
-            output_path = os.path.join(out_dir, f"{base_name}.improved.{film.target_language}.srt")
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+            output_path = os.path.join(out_dir, f"{base_name}.improved.{film.target_language}.{ts}.srt")
 
             sub_svc.write_srt(translated_lines, output_path)
             task.target_filename = f"{base_name}.improved.{film.target_language}.srt"
@@ -562,6 +681,279 @@ async def _run_improve_workflow(task_id: str):
 
         except Exception as e:
             logger.error("Improve workflow failed", task_id=task_id, error=str(e))
+            task = await session.get(TranslationTask, task_id)
+            if task:
+                task.status = TaskStatusEnum.failed
+                task.error_message = str(e)
+                await session.commit()
+
+
+# ─── Pipeline workflow (all-in-one) ───────────────────────────────────────
+
+async def _run_pipeline_workflow(task_id: str, steps: dict = None):
+    """
+    Full pipeline: extract embedded subs → whisper transcribe → analyze →
+    translate → install.
+
+    Args:
+        steps: Optional dict controlling which steps to run.
+               Keys: extract, transcribe, analyze, translate, install
+               Default: all True
+    """
+    if steps is None:
+        steps = {}
+    run = lambda k: steps.get(k, True)  # Default to True if not specified
+    from app.core.database import async_session
+
+    async with async_session() as session:
+        await settings_service.seed_if_empty(session)
+
+        ollama_url = await settings_service.get(session, "ollama_base_url")
+        ollama_model = await settings_service.get(session, "ollama_model")
+        ollama_refine_model = await settings_service.get(session, "ollama_refine_model")
+        cps_limit = await settings_service.get_int(session, "cps_limit")
+        window_size = await settings_service.get_int(session, "sliding_window_size")
+        batch_size = await settings_service.get_int(session, "batch_size")
+        temperature = await settings_service.get_float(session, "llm_temperature")
+        auto_clean_sdh = await settings_service.get_bool(session, "auto_clean_sdh")
+        draft_think = await settings_service.get_bool(session, "draft_think")
+        refine_think = await settings_service.get_bool(session, "refine_think")
+        refine_model = (ollama_refine_model or "").strip() or None
+
+        llm, ctx, tx, sub_svc = _build_services_from_settings(ollama_url, ollama_model, cps_limit)
+
+        task = await session.get(TranslationTask, task_id)
+        if not task:
+            return
+
+        film = await session.get(Film, task.film_id)
+        if not film:
+            task.status = TaskStatusEnum.failed
+            task.error_message = "Film not found"
+            await session.commit()
+            return
+
+        try:
+            # Ensure video is accessible locally
+            from app.api.films import _ensure_local_video
+            video_path = await _ensure_local_video(film, session)
+            logger.info("Pipeline: video ready", film_id=film.id, path=video_path)
+
+            # ── Step 1: Extract embedded subtitles ──────────────────
+            if run('extract'):
+                task.status = "extracting"
+                task.progress_pct = 5
+                await session.commit()
+
+                from app.services.media_service import extract_all_subtitles, check_ffmpeg_available
+                from app.services.workdir import extracted_subs_dir
+                if check_ffmpeg_available():
+                    subs_dir = extracted_subs_dir(film.id)
+                    results = extract_all_subtitles(video_path, subs_dir)
+                    extracted_count = len(results)
+                    logger.info("Pipeline: subs extracted", count=extracted_count)
+                else:
+                    extracted_count = 0
+                    logger.warning("Pipeline: ffmpeg not available, skipping extraction")
+
+            task.progress_pct = 10
+            await session.commit()
+
+            # ── Step 2: Whisper or existing subs ─────────────────────
+            task.status = "transcribing"
+            task.progress_pct = 15
+            await session.commit()
+
+            from app.services.workdir import whisper_dir, uploads_dir
+
+            # Read Whisper settings
+            ws_model = await settings_service.get(session, "whisper_model") or "medium"
+            ws_x = await settings_service.get_bool(session, "whisperx_enabled")
+
+            # Check for existing subtitle files (scan, extracted, workdir)
+            from app.api.films import _list_film_subtitles_raw
+            raw_subs = await _list_film_subtitles_raw(film.id, session)
+            source_lang_code = (task.source_language or film.source_language or "en").lower()
+            source_subs = [s for s in raw_subs if (s.get("language") or "").lower() == source_lang_code]
+
+            if source_subs:
+                # Use existing subtitle as source
+                source_path = source_subs[0]["path"]
+                task.source_path = source_path
+                task.source_filename = source_subs[0].get("filename", os.path.basename(source_path))
+            elif run('transcribe'):
+                # Transcribe with Whisper
+                whisper_path = whisper_dir(film.id)
+                from app.services.whisper_service import transcribe_video as do_transcribe
+                result = await do_transcribe(
+                    video_path, film.id,
+                    language=source_lang_code, model_size=ws_model,
+                    use_whisperx=ws_x,
+                )
+                result_path = result["output_path"] if result else None
+                if result_path and os.path.isfile(result_path):
+                    task.source_path = result_path
+                    task.source_filename = os.path.basename(result_path)
+                    logger.info("Pipeline: Whisper transcription done", path=result_path)
+                else:
+                    raise RuntimeError("Whisper transcription failed — no output")
+            else:
+                logger.warning("Pipeline: no source subs and transcription disabled, aborting")
+                raise RuntimeError("Aucun sous-titre source trouvé et la transcription est désactivée")
+
+            await session.commit()
+            task.progress_pct = 25
+
+            # Copy source to uploads for consistency
+            up_dir = uploads_dir(film.id)
+            dest = os.path.join(up_dir, task.source_filename)
+            if task.source_path != dest:
+                import shutil
+                shutil.copy2(task.source_path, dest)
+                task.source_path = dest
+            await session.commit()
+
+            # ── Step 3: Parse (always needed) ─────────────────────
+            parsed = sub_svc.parse_file(task.source_path)
+            if auto_clean_sdh:
+                parsed = sub_svc.clean_sdh_from_parsed(parsed)
+
+            # ── Step 3b: Context analysis (optional) ───────────────
+            if run('analyze'):
+                task.status = TaskStatusEnum.analyzing_context
+                task.progress_pct = 30
+                await session.commit()
+
+                characters = await ctx.build_character_profiles(film, parsed, sub_svc)
+                for c in characters:
+                    session.add(c)
+                film.characters = characters
+                await session.commit()
+
+                lore = await ctx.generate_lore_summary(parsed, characters)
+                task.lore_summary = lore
+                await session.commit()
+
+                glossary_data = await ctx.build_glossary(parsed, film.target_language)
+                idiom_data = await ctx.build_idiom_glossary(parsed, film.target_language,
+                    source_language=source_lang_code)
+                existing_terms = {e.get("source", "").lower() for e in glossary_data}
+                for entry in idiom_data:
+                    if entry.get("source", "").lower() not in existing_terms:
+                        glossary_data.append(entry)
+                for entry in glossary_data:
+                    session.add(GlossaryEntry(
+                        film_id=film.id,
+                        source_term=entry.get("source", ""),
+                        target_term=entry.get("target", ""),
+                        notes=entry.get("notes", ""),
+                    ))
+                await session.commit()
+                await session.refresh(film)
+            else:
+                logger.info("Pipeline: skipping context analysis")
+
+            task.progress_pct = 45
+            await session.commit()
+
+            # ── Step 4: Translation ─────────────────────────────────
+            if run('translate'):
+                task.status = TaskStatusEnum.translating
+                await session.commit()
+
+                ref_tracks = None
+                try:
+                    raw_all = await _list_film_subtitles_raw(film.id, session)
+                    candidates = []
+                    for s in raw_all:
+                        lang = (s.get("language") or "").lower()
+                        fn = s.get("filename", "").lower()
+                        if lang and lang != source_lang_code and "sdh" not in fn and "hi" not in fn:
+                            candidates.append((lang, s["path"]))
+                    if candidates:
+                        ref_tracks = {}
+                        for lang, tp in candidates[:2]:
+                            try:
+                                rp = sub_svc.parse_file(tp)
+                                ref_tracks[lang] = {l.index: l.text for l in rp.lines if not l.is_empty}
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+                translated_lines = await tx.translate_film_subtitles(
+                    task, film, parsed,
+                    window_size=window_size, batch_size=batch_size,
+                    temperature=temperature, think=draft_think,
+                    db_session=session, ref_tracks=ref_tracks,
+                )
+
+                task.progress_pct = 70
+                await session.commit()
+
+                # ── Step 5: Refine ────────────────────────────────
+                if refine_model:
+                    task.status = TaskStatusEnum.refining
+                    await session.commit()
+                    refine_llm = OllamaProvider(base_url=ollama_url, model=refine_model)
+                    refine_ctx = ContextService(refine_llm)
+                    refine_tx = TranslationService(refine_llm, refine_ctx, sub_svc)
+                    translated_lines = await refine_tx.refine_translation(
+                        task, film, translated_lines, parsed,
+                        batch_size=batch_size, temperature=temperature,
+                        think=refine_think, db_session=session,
+                    )
+
+                task.progress_pct = 80
+                await session.commit()
+
+                # ── Step 6: Write output ──────────────────────────
+                from app.services.workdir import output_dir as get_output_dir
+                out_dir = get_output_dir(film.id)
+                base_name = os.path.splitext(task.source_filename)[0]
+                ts = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+                output_path = os.path.join(out_dir, f"{base_name}.{film.target_language}.pipeline.{ts}.srt")
+
+                sub_svc.write_srt(translated_lines, output_path)
+                task.target_filename = f"{base_name}.{film.target_language}.pipeline.{ts}.srt"
+                task.target_path = output_path
+                task.progress_pct = 95
+                await session.commit()
+
+                # ── Step 7: Install to source ─────────────────────
+                if run('install'):
+                    task.status = "installing"
+                    await session.commit()
+
+                    try:
+                        from app.services.install_service import find_film_source_dir
+                        target_dir, err = await find_film_source_dir(film, session)
+                        if target_dir:
+                            import pathlib
+                            film_folder = pathlib.Path(target_dir).name
+                            ISO3 = {"fr": "fre", "en": "eng", "es": "spa", "de": "ger",
+                                    "it": "ita", "pt": "por", "ja": "jpn", "ko": "kor", "zh": "chi"}
+                            lang3 = ISO3.get(film.target_language, film.target_language)
+                            dest_name = f"{film_folder}.{lang3}.srt"
+                            dest_path = os.path.join(target_dir, dest_name)
+                            import shutil
+                            shutil.copy2(output_path, dest_path)
+                            logger.info("Pipeline: installed", dest=dest_path)
+                    except Exception as e:
+                        logger.warning("Pipeline: install failed", error=str(e))
+            else:
+                logger.info("Pipeline: skipping translation")
+                output_path = None
+
+            task.status = TaskStatusEnum.completed
+            task.progress_pct = 100
+            await session.commit()
+
+            logger.info("Pipeline workflow complete", task_id=task_id,
+                       output=output_path or "(no translation)")
+
+        except Exception as e:
+            logger.error("Pipeline workflow failed", task_id=task_id, error=str(e))
             task = await session.get(TranslationTask, task_id)
             if task:
                 task.status = TaskStatusEnum.failed

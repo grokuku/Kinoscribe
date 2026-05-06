@@ -173,3 +173,48 @@ async def install_subtitle_to_source(
 
         logger.info("Installed subtitle locally", path=dest_path, film_id=film.id)
         return dest_path
+
+
+async def find_film_source_dir(
+    film: Film,
+    session: AsyncSession,
+) -> tuple[Optional[str], Optional[str]]:
+    """
+    Find the local source directory for a film.
+
+    Returns (target_dir, error_message) where one is None.
+    Handles local, mounted SSH/SMB, and unmounted SSH fallback.
+    """
+    if not film.path:
+        return None, "Film has no path"
+
+    # If the film path exists locally, use it directly
+    if os.path.isdir(film.path):
+        return film.path, None
+
+    # Check if it's on a mounted source
+    if film.library_id:
+        result = await session.execute(
+            select(LibrarySource).where(LibrarySource.library_id == film.library_id)
+        )
+        sources = result.scalars().all()
+        for source in sources:
+            mp = getattr(source, 'mount_point', None)
+            if mp and mp.strip():
+                mount_path = os.path.normpath(mp)
+                remote_path = (source.ssh_remote_path or source.path or "").rstrip("/")
+                # Film path may already be under mount point
+                normalized = os.path.normpath(film.path.rstrip("/")) if film.path else ""
+                if normalized.startswith(mount_path) and os.path.isdir(normalized):
+                    return normalized, None
+                # Translate remote path to mount path
+                if film.path.rstrip("/").startswith(remote_path):
+                    local_path = film.path.rstrip("/").replace(remote_path, mount_path.rstrip("/"), 1)
+                    if os.path.isdir(local_path):
+                        return local_path, None
+
+            # Try SSH source directly (may have SSH access without mount)
+            if source.source_type == "ssh":
+                return film.path, None  # path exists remotely, caller should handle SSH write
+
+    return None, f"Film directory not accessible: {film.path}"

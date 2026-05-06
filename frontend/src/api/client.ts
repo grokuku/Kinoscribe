@@ -78,8 +78,8 @@ export const api = {
       body: form,
     });
   },
-  startTranslation: (taskId: string) =>
-    request<TaskProgress>(`/tasks/${taskId}/start`, { method: 'POST' }),
+  startTranslation: (taskId: string, body?: object) =>
+    request<TaskProgress>(`/tasks/${taskId}/start`, { method: 'POST', body: JSON.stringify(body || {}) }),
   listTasks: () => request<Task[]>('/tasks/'),
   getTask: (id: string) => request<Task>(`/tasks/${id}`),
   getTaskProgress: (id: string) => request<TaskProgress>(`/tasks/${id}/progress`),
@@ -87,6 +87,22 @@ export const api = {
     request<GlossaryEntry[]>(`/tasks/${taskId}/glossary`),
   installSubtitle: (taskId: string) =>
     request<{ status: string; task_id: string; destination: string }>(`/tasks/${taskId}/install`, { method: 'POST' }),
+
+  // Translation versions
+  listTranslations: (filmId: string) =>
+    request<{ film_id: string; target_language: string; versions: TranslationVersion[] }>(`/films/${filmId}/translations`),
+  installTranslation: (filmId: string, path: string) =>
+    request<{ status: string; film_id: string; source: string; destination: string; backup: string | null }>(`/films/${filmId}/translations/install`, {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    }),
+
+  // Pipeline
+  pipelineFilm: (filmId: string) =>
+    request<Task>(`/tasks/${filmId}/translate-existing`, {
+      method: 'POST',
+      body: JSON.stringify({ subtitle_path: '', task_type: 'pipeline' }),
+    }),
 
   // Settings
   getSettings: () => request<Setting[]>('/settings/'),
@@ -102,4 +118,4 @@ export const api = {
     ),
 };
 
-import type { Character, Task, TaskProgress, GlossaryEntry, Setting, ExistingSubtitle, TrackInfo, ExtractedTrack, WorkFiles } from '../types';
+import type { Character, Task, TaskProgress, GlossaryEntry, Setting, ExistingSubtitle, TrackInfo, ExtractedTrack, WorkFiles, TranslationVersion } from '../types';

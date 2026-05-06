@@ -824,12 +824,17 @@ async def transcribe_film(
 
     async def _run_transcription():
         from app.services.whisper_service import transcribe_video
+        from app.services.settings_service import settings_service as ssvc
         try:
+            async with async_session() as s2:
+                wh_model = await ssvc.get(s2, "whisper_model") or model_size
+                wh_x = await ssvc.get_bool(s2, "whisperx_enabled")
             result = await transcribe_video(
                 video_path=video_path,
                 film_id=film_id,
                 language=language,
-                model_size=model_size,
+                model_size=wh_model,
+                use_whisperx=wh_x,
             )
             logger.info("Whisper transcription complete", film_id=film_id, output=result.get("output_path"))
         except Exception as e:
@@ -864,12 +869,17 @@ async def sync_subtitles(
 
     async def _run_sync():
         from app.services.whisper_service import sync_with_whisper
+        from app.services.settings_service import settings_service as ssvc
         try:
+            async with async_session() as s2:
+                wh_model = await ssvc.get(s2, "whisper_model") or model_size
+                wh_x = await ssvc.get_bool(s2, "whisperx_enabled")
             result = await sync_with_whisper(
                 video_path=video_path,
                 subtitle_path=subtitle_path,
                 film_id=film_id,
-                model_size=model_size,
+                model_size=wh_model,
+                use_whisperx=wh_x,
             )
             logger.info("Subtitle sync complete", film_id=film_id, output=result.get("output_path"))
         except Exception as e:
@@ -1090,5 +1100,102 @@ async def clean_work_files(
     cleaner()
     logger.info("Cleaned work files", film_id=film_id, category=category)
     return {"status": "cleaned", "film_id": film_id, "category": category}
+
+
+# ─── Translation versions ──────────────────────────────────────────────────
+
+@router.get("/{film_id}/translations")
+async def list_translations(
+    film_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    List all translated subtitle versions for a film.
+    Returns the timestamped versions from data/output/{film_id}/.
+    """
+    film = await session.get(Film, film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+
+    from app.services.workdir import output_dir as get_output_dir
+    out_dir = get_output_dir(film_id)
+
+    versions = []
+    if os.path.isdir(out_dir):
+        for name in sorted(os.listdir(out_dir), reverse=True):
+            if not name.endswith('.srt'):
+                continue
+            full_path = os.path.join(out_dir, name)
+            if not os.path.isfile(full_path):
+                continue
+            stat = os.stat(full_path)
+            import time
+            versions.append({
+                "filename": name,
+                "path": full_path,
+                "size": stat.st_size,
+                "created": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+            })
+
+    return {"film_id": film_id, "target_language": film.target_language, "versions": versions}
+
+
+@router.post("/{film_id}/translations/install")
+async def install_translation(
+    film_id: str,
+    body: dict,
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    Install a selected translated SRT to the film's source directory
+    with the standard naming convention: Movie.Name.fre.srt (3-letter ISO code).
+
+    Body: { "path": "/app/data/output/abc/The.Matrix.fr.2026-05-06_14-30.srt" }
+    """
+    film = await session.get(Film, film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+
+    src_path = body.get("path", "")
+    if not src_path or not os.path.isfile(src_path):
+        raise HTTPException(400, f"Translation file not found: {src_path}")
+
+    # Determine the film's source directory (mounted, local, or SSH)
+    from app.services.install_service import find_film_source_dir
+    target_dir, _ = await find_film_source_dir(film, session)
+    if not target_dir or not os.path.isdir(target_dir):
+        raise HTTPException(400, "Film source directory not accessible. Check that the mount is active or the path exists.")
+
+    # Build the target filename with standard naming convention
+    # Use the film's folder name as base (cleanest for media servers)
+    import pathlib
+    film_folder = pathlib.Path(target_dir).name
+    # 3-letter ISO codes for common languages
+    ISO3 = {"fr": "fre", "en": "eng", "es": "spa", "de": "ger", "it": "ita", "pt": "por",
+            "ja": "jpn", "ko": "kor", "zh": "chi", "ru": "rus", "ar": "ara"}
+    lang3 = ISO3.get(film.target_language, film.target_language)
+    dest_name = f"{film_folder}.{lang3}.srt"
+    dest_path = os.path.join(target_dir, dest_name)
+
+    # Check for existing subtitle and warn
+    existing = None
+    if os.path.isfile(dest_path):
+        # Rename existing to .bak
+        bak_path = dest_path + ".bak"
+        os.rename(dest_path, bak_path)
+        existing = bak_path
+
+    import shutil
+    shutil.copy2(src_path, dest_path)
+
+    logger.info("Translation installed", film_id=film_id, dest=dest_path, existing_backup=existing)
+
+    return {
+        "status": "installed",
+        "film_id": film_id,
+        "source": src_path,
+        "destination": dest_path,
+        "backup": existing,
+    }
 
 

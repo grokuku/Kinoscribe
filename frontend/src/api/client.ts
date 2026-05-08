@@ -99,7 +99,7 @@ export const api = {
 
   // Pipeline
   pipelineFilm: (filmId: string) =>
-    request<Task>(`/tasks/${filmId}/translate-existing`, {
+    request<Task>(`/films/${filmId}/translate-existing`, {
       method: 'POST',
       body: JSON.stringify({ subtitle_path: '', task_type: 'pipeline' }),
     }),

@@ -110,9 +110,11 @@ async def translate_existing_subtitle(
     film = await session.get(Film, film_id)
     if not film:
         raise HTTPException(404, "Film not found")
+    logger.info("translate-existing: start", film_id=film_id, task_type=data.get("task_type"), has_subtitle_path=bool(data.get("subtitle_path")))
 
     subtitle_path = data.get("subtitle_path", "")
     task_type = data.get("task_type", "translation")
+    logger.info("translate-existing: params", subtitle_path=subtitle_path, task_type=task_type)
 
     # Pipeline doesn't need subtitle_path initially
     if task_type != "pipeline":
@@ -130,7 +132,9 @@ async def translate_existing_subtitle(
         if film.path and os.path.isdir(film.path):
             allowed_dirs.append(os.path.abspath(film.path))
         abs_path = os.path.abspath(subtitle_path)
+        logger.info("translate-existing: path check", abs_path=abs_path, allowed_dirs=allowed_dirs)
         if not any(abs_path.startswith(d + os.sep) or abs_path == d for d in allowed_dirs):
+            logger.warning("translate-existing: path traversal blocked", abs_path=abs_path)
             raise HTTPException(403, "Access denied: file path is outside allowed directories")
 
         if not os.path.isfile(subtitle_path):

@@ -408,6 +408,7 @@ async def stream_film_video(
     film = await session.get(Film, film_id)
     if not film:
         raise HTTPException(404, "Film not found")
+    logger.info("video-stream: start", film_id=film_id, video_path=film.video_path)
     if not film.video_path:
         raise HTTPException(400, "No video file registered for this film")
 
@@ -415,7 +416,10 @@ async def stream_film_video(
     # First try the streamlined _ensure_local_video which handles all cases
     try:
         accessible_path = await _ensure_local_video(film, session)
+        logger.info("video-stream: resolved", accessible_path=accessible_path, 
+                   exists=os.path.isfile(accessible_path) if accessible_path else False)
     except Exception as e:
+        logger.error("video-stream: error resolving path", error=str(e))
         accessible_path = None
     
     if not accessible_path or not os.path.isfile(accessible_path):
@@ -792,9 +796,11 @@ async def transcribe_film(
 
     if not film.video_path:
         raise HTTPException(400, "No video file found for this film. Run a library scan first.")
+    logger.info("transcribe: start", film_id=film_id, video_path=film.video_path)
 
     # Ensure video is accessible locally (download from SSH if needed)
     video_path = await _ensure_local_video(film, session)
+    logger.info("transcribe: video resolved", video_path=video_path, exists=os.path.isfile(video_path) if video_path else False)
     if not video_path or not os.path.isfile(video_path):
         raise HTTPException(400, f"Video file not accessible: {film.video_path}")
 
@@ -889,9 +895,11 @@ async def get_film_tracks(
 
     if not check_ffmpeg_available():
         raise HTTPException(501, "ffmpeg/ffprobe not installed on the server. Install both to use track discovery.")
+    logger.info("tracks: start", film_id=film_id, video_path=film.video_path)
 
     # Ensure video is accessible locally (download from SSH if needed)
     video_path = await _ensure_local_video(film, session)
+    logger.info("tracks: video resolved", video_path=video_path, exists=os.path.isfile(video_path) if video_path else False)
     if not video_path or not os.path.isfile(video_path):
         raise HTTPException(400, f"Video file not accessible: {film.video_path}")
 

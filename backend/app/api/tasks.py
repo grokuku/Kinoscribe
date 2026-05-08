@@ -7,7 +7,7 @@ import asyncio
 from typing import List
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Body
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -112,10 +112,12 @@ async def translate_existing_subtitle(
         raise HTTPException(404, "Film not found")
 
     subtitle_path = data.get("subtitle_path", "")
-    if not subtitle_path:
-        raise HTTPException(400, "subtitle_path is required")
-
     task_type = data.get("task_type", "translation")
+
+    # Pipeline doesn't need subtitle_path initially
+    if task_type != "pipeline":
+        if not subtitle_path:
+            raise HTTPException(400, "subtitle_path is required")
 
     # ── Path traversal protection ────────────────────────────────────────
     from app.services.workdir import WORK_BASE, OUTPUT_BASE
@@ -170,7 +172,7 @@ async def translate_existing_subtitle(
 @router.post("/{task_id}/start", response_model=TaskProgressOut)
 async def start_translation(
     task_id: str,
-    body: dict = {},
+    body: dict = Body(default={}),
     session: AsyncSession = Depends(get_session),
 ):
     """Kick off the workflow for a task (translation, improve, sync, pipeline).
@@ -195,7 +197,7 @@ async def start_translation(
     elif task.task_type == "pipeline":
         task.status = "extracting"
         await session.commit()
-        steps = body.get("pipeline_steps", {}) if body else {}
+        steps = body.get("pipeline_steps", {})
         start_task(task_id, _run_pipeline_workflow(task_id, steps))
     else:
         # Default: translation workflow

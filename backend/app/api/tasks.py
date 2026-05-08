@@ -119,22 +119,22 @@ async def translate_existing_subtitle(
         if not subtitle_path:
             raise HTTPException(400, "subtitle_path is required")
 
-    # ── Path traversal protection ────────────────────────────────────────
-    from app.services.workdir import WORK_BASE, OUTPUT_BASE
+        # ── Path traversal protection ────────────────────────────────
+        from app.services.workdir import WORK_BASE, OUTPUT_BASE
 
-    allowed_dirs = [
-        os.path.abspath(WORK_BASE),
-        os.path.abspath(OUTPUT_BASE),
-        os.path.abspath(os.path.join("data", "uploads")),  # legacy compat
-    ]
-    if film.path and os.path.isdir(film.path):
-        allowed_dirs.append(os.path.abspath(film.path))
-    abs_path = os.path.abspath(subtitle_path)
-    if not any(abs_path.startswith(d + os.sep) or abs_path == d for d in allowed_dirs):
-        raise HTTPException(403, "Access denied: file path is outside allowed directories")
+        allowed_dirs = [
+            os.path.abspath(WORK_BASE),
+            os.path.abspath(OUTPUT_BASE),
+            os.path.abspath(os.path.join("data", "uploads")),  # legacy compat
+        ]
+        if film.path and os.path.isdir(film.path):
+            allowed_dirs.append(os.path.abspath(film.path))
+        abs_path = os.path.abspath(subtitle_path)
+        if not any(abs_path.startswith(d + os.sep) or abs_path == d for d in allowed_dirs):
+            raise HTTPException(403, "Access denied: file path is outside allowed directories")
 
-    if not os.path.isfile(subtitle_path):
-        raise HTTPException(400, f"Subtitle file not found: {subtitle_path}")
+        if not os.path.isfile(subtitle_path):
+            raise HTTPException(400, f"Subtitle file not found: {subtitle_path}")
 
     # Auto-detect source language
     filename = os.path.basename(subtitle_path)

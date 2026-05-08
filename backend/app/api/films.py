@@ -412,37 +412,13 @@ async def stream_film_video(
         raise HTTPException(400, "No video file registered for this film")
 
     # Determine accessible path
-    accessible_path = None
-
-    # 1. Fast path: does the video path already exist locally?
-    if os.path.isfile(film.video_path):
-        accessible_path = film.video_path
-    elif film.library_id:
-        # 2. Try translating remote path to mount point
-        from app.models.database import LibrarySource
-        from sqlalchemy import select as sa_select2
-        result2 = await session.execute(
-            sa_select2(LibrarySource).where(LibrarySource.library_id == film.library_id)
-        )
-        sources2 = result2.scalars().all()
-        for source2 in sources2:
-            mount_mp = getattr(source2, 'mount_point', None)
-            if mount_mp and mount_mp.strip():
-                mount_path = os.path.normpath(mount_mp)
-                remote_path = (source2.ssh_remote_path or source2.path or "").rstrip("/")
-                # Path starts with remote path → translate
-                if film.video_path.startswith(remote_path):
-                    translated = film.video_path.replace(remote_path, mount_path.rstrip('/'), 1)
-                    if os.path.isfile(translated):
-                        accessible_path = translated
-                        break
-                # Path might already be under mount_path
-                normalized = os.path.normpath(film.video_path)
-                if normalized.startswith(mount_path) and os.path.isfile(normalized):
-                    accessible_path = normalized
-                    break
-
-    if not accessible_path:
+    # First try the streamlined _ensure_local_video which handles all cases
+    try:
+        accessible_path = await _ensure_local_video(film, session)
+    except Exception as e:
+        accessible_path = None
+    
+    if not accessible_path or not os.path.isfile(accessible_path):
         raise HTTPException(404, f"Video file not found on disk: {film.video_path}. Check that the mount is active.")
 
     ext = os.path.splitext(accessible_path)[1].lower()
@@ -819,6 +795,8 @@ async def transcribe_film(
 
     # Ensure video is accessible locally (download from SSH if needed)
     video_path = await _ensure_local_video(film, session)
+    if not video_path or not os.path.isfile(video_path):
+        raise HTTPException(400, f"Video file not accessible: {film.video_path}")
 
     from app.core.database import async_session
 
@@ -914,6 +892,8 @@ async def get_film_tracks(
 
     # Ensure video is accessible locally (download from SSH if needed)
     video_path = await _ensure_local_video(film, session)
+    if not video_path or not os.path.isfile(video_path):
+        raise HTTPException(400, f"Video file not accessible: {film.video_path}")
 
     try:
         tracks = probe_tracks(video_path)

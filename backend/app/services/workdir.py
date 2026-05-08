@@ -48,6 +48,9 @@ def film_work_dir(film_id: str) -> str:
     os.makedirs(path, exist_ok=True)
     return path
 
+# Alias for backward compatibility
+work_dir = film_work_dir
+
 
 def audio_dir(film_id: str) -> str:
     """Directory for extracted audio tracks: data/work/{film_id}/audio/"""

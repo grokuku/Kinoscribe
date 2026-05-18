@@ -140,21 +140,28 @@ async def translate_existing_subtitle(
         if not os.path.isfile(subtitle_path):
             raise HTTPException(400, f"Subtitle file not found: {subtitle_path}")
 
-    # Auto-detect source language
-    filename = os.path.basename(subtitle_path)
-    sub_info = parse_subtitle_filename(filename)
-    source_language = data.get("source_language") or sub_info.get("language") or "en"
+        # Auto-detect source language
+        filename = os.path.basename(subtitle_path)
+        sub_info = parse_subtitle_filename(filename)
+        source_language = data.get("source_language") or sub_info.get("language") or "en"
 
-    # Copy to work dir uploads/ for consistency
-    from app.services.workdir import uploads_dir
-    upload_dir = uploads_dir(film_id)
-    dest_path = os.path.join(upload_dir, filename)
-    if dest_path != subtitle_path:
-        import shutil
-        shutil.copy2(subtitle_path, dest_path)
+        # Copy to work dir uploads/ for consistency
+        from app.services.workdir import uploads_dir
+        upload_dir = uploads_dir(film_id)
+        dest_path = os.path.join(upload_dir, filename)
+        if dest_path != subtitle_path:
+            import shutil
+            shutil.copy2(subtitle_path, dest_path)
+            subtitle_path = dest_path
 
-    fmt = os.path.splitext(filename)[1].lstrip(".").lower()
-    if fmt not in ("srt", "vtt", "ass", "ssa"):
+        fmt = os.path.splitext(filename)[1].lstrip(".").lower()
+        if fmt not in ("srt", "vtt", "ass", "ssa"):
+            fmt = "srt"
+    else:
+        # Pipeline: source will be determined by the workflow
+        filename = ""
+        source_language = data.get("source_language") or film.source_language or "en"
+        subtitle_path = ""
         fmt = "srt"
 
     task = TranslationTask(

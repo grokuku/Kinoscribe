@@ -47,6 +47,8 @@ services:
       - /dev/fuse:/dev/fuse
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - kinoscribe-net
 
   # ─── Frontend (React + Nginx) ───────────────────────────
   frontend:
@@ -57,6 +59,11 @@ services:
       - "15000:80"
     depends_on:
       - backend
+    networks:
+      - kinoscribe-net
 
 volumes:
   backend-data:
+
+networks:
+  kinoscribe-net:

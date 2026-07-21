@@ -1,3 +1,9 @@
+> ## ⚠️ Avertissement
+>
+> Ce projet est **100% vibecoding** — entièrement généré par IA, sans revue humaine sérieuse du code.
+> C'est un projet **expérimental** : probablement pas stable, pas forcément utilisable en l'état, et susceptible de casser de façon inattendue.
+> Utilisez-le à vos risques et périls (et avec un peu de bienveillance). 🙃
+
 # Kinoscribe
 
 *Kino* (cinéma) + *scribe* (celui qui écrit) — traduction locale et contextualisée de sous-titres par IA.

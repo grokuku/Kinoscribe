@@ -100,6 +100,7 @@ class FilmOut(BaseModel):
 class TaskOut(BaseModel):
     id: str
     film_id: str
+    film_title: Optional[str] = None
     task_type: str = "translation"
     status: TaskStatus = TaskStatus.pending
     source_filename: str
@@ -118,6 +119,9 @@ class TaskProgressOut(BaseModel):
     status: TaskStatus
     progress_pct: int
     error_message: Optional[str] = None
+    total_lines: Optional[int] = None
+    translated_lines: Optional[int] = None
+    draft_path: Optional[str] = None
 
 
 # ─── Glossary ───────────────────────────────────────────────────────────────

@@ -697,7 +697,7 @@ async def analyze_film_context(
     await session.commit()
 
     async def _run_analysis():
-        from app.services.llm_provider import OllamaProvider
+        from app.services.llm_provider import OpenAIProvider
         from app.services.context_service import ContextService
         from app.services.subtitle_service import SubtitleService
         from app.services.settings_service import settings_service
@@ -708,9 +708,10 @@ async def analyze_film_context(
             if not f:
                 return
             try:
-                ollama_url = await settings_service.get(s, "ollama_base_url") or "http://ollama:11434"
-                ollama_model = await settings_service.get(s, "ollama_model") or "llama3"
-                llm = OllamaProvider(base_url=ollama_url, model=ollama_model)
+                base_url = await settings_service.get(s, "openai_base_url") or "https://api.openai.com/v1"
+                api_key = await settings_service.get(s, "openai_api_key") or ""
+                model = await settings_service.get(s, "openai_model") or "gpt-4o-mini"
+                llm = OpenAIProvider(base_url=base_url, api_key=api_key, model=model)
                 ctx = ContextService(llm)
                 sub_svc = SubtitleService()
 
@@ -1092,6 +1093,59 @@ async def clean_work_files(
 
 # ─── Translation versions ──────────────────────────────────────────────────
 
+@router.post("/{film_id}/translations/content")
+async def read_translation_content(
+    film_id: str,
+    body: dict,
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    Read and parse the content of a translated subtitle file by its path.
+    Returns the same structured format as GET /api/tasks/{task_id}/content.
+    """
+    film = await session.get(Film, film_id)
+    if not film:
+        raise HTTPException(404, "Film not found")
+
+    file_path = body.get("path", "")
+    if not file_path or not os.path.isfile(file_path):
+        raise HTTPException(400, f"File not found: {file_path}")
+
+    from app.services.subtitle_service import SubtitleService
+    svc = SubtitleService()
+    try:
+        parsed = svc.parse_file(file_path)
+    except Exception as e:
+        raise HTTPException(500, f"Failed to read subtitle file: {str(e)[:200]}")
+
+    lines = []
+    raw_text_parts = []
+    for line in parsed.lines:
+        if not line.is_empty:
+            lines.append({
+                "index": line.index,
+                "start": line.start,
+                "end": line.end,
+                "text": line.text,
+            })
+            raw_text_parts.append(line.text)
+        else:
+            lines.append({
+                "index": line.index,
+                "start": "",
+                "end": "",
+                "text": "",
+            })
+
+    import os
+    return {
+        "filename": os.path.basename(file_path),
+        "raw_text": "\n\n".join(raw_text_parts),
+        "lines": lines,
+        "line_count": len([l for l in lines if l["text"]]),
+    }
+
+
 @router.get("/{film_id}/translations")
 async def list_translations(
     film_id: str,
@@ -1155,14 +1209,16 @@ async def install_translation(
         raise HTTPException(400, "Film source directory not accessible. Check that the mount is active or the path exists.")
 
     # Build the target filename with standard naming convention
-    # Use the film's folder name as base (cleanest for media servers)
-    import pathlib
-    film_folder = pathlib.Path(target_dir).name
+    # Use the video file's basename (without extension) as base
+    import os
+    if not film.video_path:
+        raise HTTPException(400, "Film has no video_path — cannot determine install location")
+    video_basename = os.path.splitext(os.path.basename(film.video_path))[0]
     # 3-letter ISO codes for common languages
     ISO3 = {"fr": "fre", "en": "eng", "es": "spa", "de": "ger", "it": "ita", "pt": "por",
             "ja": "jpn", "ko": "kor", "zh": "chi", "ru": "rus", "ar": "ara"}
     lang3 = ISO3.get(film.target_language, film.target_language)
-    dest_name = f"{film_folder}.{lang3}.srt"
+    dest_name = f"{video_basename}.{lang3}.srt"
     dest_path = os.path.join(target_dir, dest_name)
 
     # Check for existing subtitle and warn

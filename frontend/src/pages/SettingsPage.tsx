@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api/client';
 import type { Setting } from '../types/settings';
-import { Save, CheckCircle2, Wifi, WifiOff, RefreshCw, Cpu, Box, X } from 'lucide-react';
+import { Save, CheckCircle2, Wifi, WifiOff, RefreshCw, Cpu, Box, X, Key } from 'lucide-react';
 
 // ─── Toast system (simplified) ──────────────────────────────────────────
 type ToastType = 'success' | 'error' | 'info';
@@ -38,12 +38,17 @@ export default function SettingsPage() {
   const [saved, setSaved] = useState(false);
   const [ollamaTest, setOllamaTest] = useState<{ ok: boolean; models?: string[]; error?: string } | null>(null);
   const [testing, setTesting] = useState(false);
+  const [openaiTest, setOpenaiTest] = useState<{ ok: boolean; models?: string[]; error?: string } | null>(null);
+  const [testingOpenAI, setTestingOpenAI] = useState(false);
   const [form, setForm] = useState<Record<string, string>>({});
 
-  // Dynamic Ollama models list
+  // Dynamic model lists
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
+  const [openaiModels, setOpenaiModels] = useState<string[]>([]);
+  const [fetchingOpenAIModels, setFetchingOpenAIModels] = useState(false);
+  const [openaiModelsError, setOpenaiModelsError] = useState<string | null>(null);
 
   useEffect(() => { load(); }, []);
 
@@ -56,6 +61,7 @@ export default function SettingsPage() {
       data.forEach((s) => { map[s.key] = s.value; });
       setForm(map);
       if (map.ollama_base_url) fetchModels(map.ollama_base_url);
+      if (map.openai_base_url) fetchOpenAIModels(map.openai_base_url, map.openai_api_key);
     } catch (e: any) {
       toast.error('Erreur : ' + e.message);
     } finally {
@@ -73,6 +79,18 @@ export default function SettingsPage() {
       else { setOllamaModels([]); setModelsError(result.error || 'Erreur inconnue'); }
     } catch (e: any) { setOllamaModels([]); setModelsError(e.message); }
     finally { setFetchingModels(false); }
+  }
+
+  async function fetchOpenAIModels(baseUrl: string, apiKey?: string) {
+    if (!baseUrl.trim()) { setOpenaiModels([]); return; }
+    setFetchingOpenAIModels(true);
+    setOpenaiModelsError(null);
+    try {
+      const result = await api.fetchOpenAIModels(baseUrl, apiKey);
+      if (result.ok) setOpenaiModels(result.models);
+      else { setOpenaiModels([]); setOpenaiModelsError(result.error || 'Erreur inconnue'); }
+    } catch (e: any) { setOpenaiModels([]); setOpenaiModelsError(e.message); }
+    finally { setFetchingOpenAIModels(false); }
   }
 
   async function handleSave() {
@@ -105,6 +123,21 @@ export default function SettingsPage() {
     }
   }
 
+  async function handleTestOpenAI() {
+    setTestingOpenAI(true);
+    setOpenaiTest(null);
+    try {
+      await api.updateSettings({ openai_base_url: form.openai_base_url || '', openai_api_key: form.openai_api_key || '' });
+      const result = await api.testOpenAI();
+      setOpenaiTest(result);
+      if (result.ok && result.models) setOpenaiModels(result.models);
+    } catch (e: any) {
+      setOpenaiTest({ ok: false, error: e.message });
+    } finally {
+      setTestingOpenAI(false);
+    }
+  }
+
   const set = (key: string, value: string) =>
     setForm((f) => ({ ...f, [key]: value }));
 
@@ -113,15 +146,16 @@ export default function SettingsPage() {
   const categories: Record<string, Setting[]> = {};
   for (const s of settings) {
     if (hiddenKeys.has(s.key)) continue;
+    // Put deprecated keys at the end within their category
     if (!categories[s.category]) categories[s.category] = [];
     categories[s.category].push(s);
   }
 
   const categoryConfig: Record<string, { label: string; icon: typeof Cpu; description: string }> = {
     llm: {
-      label: 'Serveur LLM (Ollama)',
+      label: 'Serveur LLM',
       icon: Cpu,
-      description: 'Configuration du modèle de langage et du serveur Ollama',
+      description: 'Configuration du fournisseur LLM et du modèle',
     },
     translation: {
       label: 'Traduction',
@@ -143,9 +177,19 @@ export default function SettingsPage() {
       icon: Box,
       description: 'Paramètres généraux',
     },
+    security: {
+      label: 'Sécurité',
+      icon: Key,
+      description: 'Configuration SSH et accès distant',
+    },
   };
 
-  const modelKeys = new Set(['ollama_model', 'ollama_refine_model']);
+  // Keys that show the OpenAI model select (dropdown with fetched models)
+  const openaiModelKeys = new Set(['openai_model', 'openai_refine_model']);
+
+  // Keys considered "deprecated" (prefixed with [Déprécié] or ollama_)
+  const isDeprecatedKey = (key: string) =>
+    key.startsWith('ollama_') || key === 'draft_think' || key === 'refine_think';
 
   const handleUrlChange = useCallback(
     (() => {
@@ -159,12 +203,37 @@ export default function SettingsPage() {
     []
   );
 
+  const handleOpenAIUrlChange = useCallback(
+    (() => {
+      let timeout: ReturnType<typeof setTimeout>;
+      return (value: string) => {
+        set('openai_base_url', value);
+        clearTimeout(timeout);
+        timeout = setTimeout(() => fetchOpenAIModels(value, form.openai_api_key), 800);
+      };
+    })(),
+    [form.openai_api_key]
+  );
+
+  const handleApiKeyChange = (value: string) => {
+    set('openai_api_key', value);
+    // Re-fetch models if URL is already set
+    if (form.openai_base_url) {
+      fetchOpenAIModels(form.openai_base_url, value);
+    }
+  };
+
   // Pretty label from key
   const prettyLabel = (key: string) => {
     const map: Record<string, string> = {
-      ollama_base_url: 'URL du serveur',
-      ollama_model: 'Modèle de draft',
-      ollama_refine_model: "Modèle d'affinage",
+      provider: 'Fournisseur',
+      openai_base_url: 'URL de l\'API',
+      openai_api_key: 'Clé API',
+      openai_model: 'Modèle de draft',
+      openai_refine_model: "Modèle d'affinage",
+      ollama_base_url: 'URL du serveur (Ollama)',
+      ollama_model: 'Modèle de draft (Ollama)',
+      ollama_refine_model: "Modèle d'affinage (Ollama)",
       llm_temperature: 'Température',
       draft_think: 'Réflexion (draft)',
       refine_think: 'Réflexion (affinage)',
@@ -218,6 +287,10 @@ export default function SettingsPage() {
           const Icon = config.icon;
           const isLlm = cat === 'llm';
 
+          // Separate deprecated items
+          const activeItems = items.filter(s => !isDeprecatedKey(s.key));
+          const deprecatedItems = items.filter(s => isDeprecatedKey(s.key));
+
           return (
             <div key={cat} className={isLlm ? 'lg:col-span-2' : ''}>
               {/* Category header */}
@@ -233,124 +306,174 @@ export default function SettingsPage() {
                 </div>
               </div>
 
-              {/* Settings card */}
-              <div className="glass-card divide-y divide-white/[0.04] overflow-hidden">
-                {items.map((s) => (
-                  <div key={s.key} className="px-5 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-6">
-                    {/* Label + description */}
-                    <div className="min-w-0 sm:w-1/3">
-                      <label className="text-sm font-semibold text-gray-200">{prettyLabel(s.key)}</label>
-                      {s.description && (
-                        <p className="text-xs text-gray-600 mt-0.5 leading-relaxed">{s.description}</p>
-                      )}
-                    </div>
+              {/* Active settings card */}
+              {activeItems.length > 0 && (
+                <div className="glass-card divide-y divide-white/[0.04] overflow-hidden">
+                  {activeItems.map((s) => (
+                    <div key={s.key} className="px-5 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-6">
+                      {/* Label + description */}
+                      <div className="min-w-0 sm:w-1/3">
+                        <label className="text-sm font-semibold text-gray-200">{prettyLabel(s.key)}</label>
+                        {s.description && (
+                          <p className="text-xs text-gray-600 mt-0.5 leading-relaxed">{s.description}</p>
+                        )}
+                      </div>
 
-                    {/* Input */}
-                    <div className="sm:w-2/3">
-                      {modelKeys.has(s.key) ? (
-                        <ModelSelect
-                          value={form[s.key] || ''}
-                          models={ollamaModels}
-                          onChange={(v) => set(s.key, v)}
-                        />
-                      ) : s.input_type === 'select' && s.options ? (
-                        <select
-                          value={form[s.key] || ''}
-                          onChange={(e) => set(s.key, e.target.value)}
-                          className="select-field"
-                        >
-                          {s.options.split(',').map((opt) => (
-                            <option key={opt} value={opt}>{opt.toUpperCase()}</option>
-                          ))}
-                        </select>
-                      ) : s.input_type === 'password' ? (
-                        <input
-                          type="password"
-                          value={form[s.key] || ''}
-                          onChange={(e) => set(s.key, e.target.value)}
-                          placeholder="••••••••"
-                          className="input-field"
-                        />
-                      ) : s.key === 'ollama_base_url' ? (
-                        <div className="relative">
-                          <input
-                            type="url"
+                      {/* Input */}
+                      <div className="sm:w-2/3">
+                        {openaiModelKeys.has(s.key) ? (
+                          <ModelSelect
                             value={form[s.key] || ''}
-                            onChange={(e) => handleUrlChange(e.target.value)}
-                            placeholder="http://host:11434"
-                            className="input-field !pr-10"
+                            models={openaiModels}
+                            onChange={(v) => set(s.key, v)}
                           />
-                          {fetchingModels && (
-                            <span className="absolute right-3 top-1/2 -translate-y-1/2">
-                              <div className="w-4 h-4 border-2 border-brand-500/30 border-t-brand-500 rounded-full animate-spin" />
-                            </span>
-                          )}
-                        </div>
-                      ) : (
-                        <input
-                          type={s.input_type === 'number' ? 'number' : 'text'}
-                          value={form[s.key] || ''}
-                          onChange={(e) => set(s.key, e.target.value)}
-                          step={s.input_type === 'number' ? 'any' : undefined}
-                          className="input-field"
-                        />
-                      )}
+                        ) : s.input_type === 'select' && s.options ? (
+                          <select
+                            value={form[s.key] || ''}
+                            onChange={(e) => set(s.key, e.target.value)}
+                            className="select-field"
+                          >
+                            {s.options.split(',').map((opt) => (
+                              <option key={opt} value={opt}>{opt.toUpperCase()}</option>
+                            ))}
+                          </select>
+                        ) : s.input_type === 'password' ? (
+                          <input
+                            type="password"
+                            value={form[s.key] || ''}
+                            onChange={(e) => set(s.key, e.target.value)}
+                            placeholder="••••••••"
+                            className="input-field"
+                          />
+                        ) : s.key === 'openai_base_url' ? (
+                          <div className="relative">
+                            <input
+                              type="url"
+                              value={form[s.key] || ''}
+                              onChange={(e) => handleOpenAIUrlChange(e.target.value)}
+                              placeholder="https://api.openai.com/v1"
+                              className="input-field !pr-10"
+                            />
+                            {fetchingOpenAIModels && (
+                              <span className="absolute right-3 top-1/2 -translate-y-1/2">
+                                <div className="w-4 h-4 border-2 border-brand-500/30 border-t-brand-500 rounded-full animate-spin" />
+                              </span>
+                            )}
+                          </div>
+                        ) : s.key === 'openai_api_key' ? (
+                          <div className="relative">
+                            <input
+                              type="password"
+                              value={form[s.key] || ''}
+                              onChange={(e) => handleApiKeyChange(e.target.value)}
+                              placeholder="sk-..."
+                              className="input-field !pr-10"
+                            />
+                          </div>
+                        ) : (
+                          <input
+                            type={s.input_type === 'number' ? 'number' : 'text'}
+                            value={form[s.key] || ''}
+                            onChange={(e) => set(s.key, e.target.value)}
+                            step={s.input_type === 'number' ? 'any' : undefined}
+                            className="input-field"
+                          />
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
 
-              {/* Ollama extras */}
+              {/* OpenAI extras */}
               {isLlm && (
                 <div className="mt-4 space-y-3 px-1">
+                  {/* OpenAI test connection */}
                   <div className="flex items-center gap-3 flex-wrap">
                     <button
-                      onClick={handleTestOllama}
-                      disabled={testing}
-                      className={ollamaTest?.ok ? 'btn-secondary' : 'btn-primary'}
+                      onClick={handleTestOpenAI}
+                      disabled={testingOpenAI}
+                      className={openaiTest?.ok ? 'btn-secondary' : 'btn-primary'}
                     >
-                      {testing ? (
+                      {testingOpenAI ? (
                         <RefreshCw className="w-4 h-4 animate-spin" />
-                      ) : ollamaTest?.ok ? (
+                      ) : openaiTest?.ok ? (
                         <Wifi className="w-4 h-4 text-emerald-400" />
                       ) : (
                         <WifiOff className="w-4 h-4" />
                       )}
-                      {testing ? 'Test en cours…' : 'Tester la connexion'}
+                      {testingOpenAI ? 'Test en cours…' : 'Tester la connexion API'}
                     </button>
-                    {ollamaTest && (
-                      <div className={`text-sm ${ollamaTest.ok ? 'text-emerald-400' : 'text-red-400'}`}>
-                        {ollamaTest.ok ? (
+                    {openaiTest && (
+                      <div className={`text-sm ${openaiTest.ok ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {openaiTest.ok ? (
                           <>
-                            ✅ Connecté — {ollamaTest.models?.length || 0} modèle(s)
-                            {ollamaTest.models && ollamaTest.models.length > 0 && (
+                            ✅ Connecté — {openaiTest.models?.length || 0} modèle(s)
+                            {openaiTest.models && openaiTest.models.length > 0 && (
                               <span className="text-gray-600 ml-1">
-                                ({ollamaTest.models.slice(0, 5).join(', ')}{ollamaTest.models.length > 5 ? '…' : ''})
+                                ({openaiTest.models.slice(0, 5).join(', ')}{openaiTest.models.length > 5 ? '…' : ''})
                               </span>
                             )}
                           </>
                         ) : (
-                          <>❌ {ollamaTest.error}</>
+                          <>❌ {openaiTest.error}</>
                         )}
                       </div>
                     )}
                   </div>
 
-                  {modelsError && (
-                    <p className="text-xs text-red-400">⚠️ Impossible de charger les modèles : {modelsError}</p>
+                  {openaiModelsError && (
+                    <p className="text-xs text-red-400">⚠️ Impossible de charger les modèles : {openaiModelsError}</p>
                   )}
-                  {ollamaModels.length > 0 && !fetchingModels && (
+                  {openaiModels.length > 0 && !fetchingOpenAIModels && (
                     <p className="text-xs text-gray-500">
-                      📦 {ollamaModels.length} modèle(s) disponible(s) — utilisez les listes déroulantes ci-dessus
+                      📦 {openaiModels.length} modèle(s) disponible(s) — utilisez les listes déroulantes ci-dessus
                     </p>
                   )}
-                  {ollamaModels.length === 0 && !fetchingModels && form.ollama_base_url && !modelsError && (
+                  {openaiModels.length === 0 && !fetchingOpenAIModels && form.openai_base_url && !openaiModelsError && (
                     <p className="text-xs text-yellow-500/80">
-                      💡 Aucun modèle trouvé. Vérifiez l'URL ou tirez un modèle avec{' '}
-                      <code className="bg-white/[0.04] px-1.5 py-0.5 rounded text-yellow-400">ollama pull &lt;model&gt;</code>
+                      💡 Aucun modèle trouvé. Vérifiez l'URL et la clé API.
                     </p>
                   )}
+
+                  {/* Configuration hints */}
+                  <div className="text-xs text-gray-500 space-y-1 mt-2 border-t border-white/[0.04] pt-3">
+                    <p className="font-semibold text-gray-400 mb-1">🔌 Configurations courantes :</p>
+                    <p><span className="text-brand-400">OpenAI</span> → <code className="bg-white/[0.04] px-1 rounded text-gray-300">https://api.openai.com/v1</code> + clé API</p>
+                    <p><span className="text-brand-400">OpenRouter</span> → <code className="bg-white/[0.04] px-1 rounded text-gray-300">https://openrouter.ai/api/v1</code> + clé API</p>
+                    <p><span className="text-brand-400">Together AI</span> → <code className="bg-white/[0.04] px-1 rounded text-gray-300">https://api.together.xyz/v1</code> + clé API</p>
+                    <p><span className="text-brand-400">Ollama (local)</span> → <code className="bg-white/[0.04] px-1 rounded text-gray-300">http://localhost:11434/v1</code> (pas de clé)</p>
+                  </div>
                 </div>
+              )}
+
+              {/* Deprecated settings (collapsed) */}
+              {deprecatedItems.length > 0 && (
+                <details className="mt-3 px-1">
+                  <summary className="text-xs text-gray-600 cursor-pointer hover:text-gray-400 select-none">
+                    ⚠️ Paramètres dépréciés ({deprecatedItems.length})
+                  </summary>
+                  <div className="mt-2 glass-card divide-y divide-white/[0.04] overflow-hidden opacity-60">
+                    {deprecatedItems.map((s) => (
+                      <div key={s.key} className="px-5 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-6">
+                        <div className="min-w-0 sm:w-1/3">
+                          <label className="text-xs font-semibold text-gray-400">{prettyLabel(s.key)}</label>
+                          {s.description && (
+                            <p className="text-[10px] text-gray-600 mt-0.5">{s.description}</p>
+                          )}
+                        </div>
+                        <div className="sm:w-2/3">
+                          <input
+                            type="text"
+                            value={form[s.key] || ''}
+                            onChange={(e) => set(s.key, e.target.value)}
+                            className="input-field !py-1.5 !text-xs"
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </details>
               )}
             </div>
           );

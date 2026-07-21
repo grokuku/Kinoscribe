@@ -82,6 +82,7 @@ export type TaskType =
 export interface Task {
   id: string;
   film_id: string;
+  film_title?: string;
   task_type: TaskType;
   status: TaskStatus;
   source_filename: string;
@@ -155,4 +156,13 @@ export interface TranslationVersion {
   path: string;
   size: number;
   created: string;
+}
+
+// ─── Subtitle lines ───────────────────────────────────────────
+
+export interface SubtitleLine {
+  index: number;
+  start: string;
+  end: string;
+  text: string;
 }

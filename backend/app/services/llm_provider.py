@@ -1,8 +1,8 @@
 """
-Abstract LLM provider interface + Ollama implementation using /api/chat.
-Switching to /api/chat gives us native system/user/assistant roles
-and better compatibility with the OpenAI message format.
-Supports Ollama's "think" parameter for reasoning-capable models.
+Abstract LLM provider interface + OpenAI-compatible implementation.
+Uses the standard /v1/chat/completions endpoint (compatible with OpenAI,
+OpenRouter, Together AI, and any custom provider).
+Supports JSON mode via response_format and streaming via SSE.
 """
 
 import json
@@ -78,24 +78,33 @@ class LLMProvider(ABC):
         return await self.chat(messages, think=think)
 
 
-# ─── Ollama /api/chat provider ─────────────────────────────────────────────
+# ─── OpenAI-compatible /v1/chat/completions provider ───────────────────────
 
-class OllamaProvider(LLMProvider):
-    """LLM provider using Ollama's /api/chat endpoint.
+class OpenAIProvider(LLMProvider):
+    """LLM provider using the OpenAI-compatible /v1/chat/completions endpoint.
 
-    Supports the 'think' parameter for reasoning-capable models
-    (deepseek-v3.2, qwen3.5, mistral-large-3, gpt-oss, kimi-k2, etc).
-    When think=True, the model produces a thinking trace before the answer.
-    When think=False, the model responds directly (faster, for draft passes).
+    Works with:
+      - OpenAI          (https://api.openai.com/v1)
+      - OpenRouter      (https://openrouter.ai/api/v1)
+      - Together AI     (https://api.together.xyz/v1)
+      - Any custom provider implementing the same API shape.
+
+    Authentication is via Bearer token in the Authorization header.
+    Supports JSON mode (response_format={"type": "json_object"}).
+    The 'think' parameter is accepted for interface compatibility but ignored
+    (OpenAI doesn't have a generic 'think' parameter; reasoning models like
+     o1/o3 use a different API contract).
     """
 
     def __init__(
         self,
         base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
         model: Optional[str] = None,
     ):
-        self.base_url = (base_url or settings.ollama_base_url).rstrip("/")
-        self.model = model or settings.ollama_model
+        self.base_url = (base_url or settings.openai_base_url).rstrip("/")
+        self.api_key = api_key or settings.openai_api_key or ""
+        self.model = model or settings.openai_model
 
     async def chat(
         self,
@@ -105,64 +114,74 @@ class OllamaProvider(LLMProvider):
         format_json: bool = False,
         think: Optional[bool] = None,
     ) -> str:
-        """Call Ollama /api/chat and return the full response.
+        """Call /v1/chat/completions and return the response content.
 
         Args:
             messages: Chat messages (system, user, assistant).
-            model: Override the default model.
-            temperature: Sampling temperature.
-            format_json: Request JSON-formatted output.
-            think: Enable/disable thinking mode for reasoning models.
-                   None = don't send the parameter (model default).
-                   True = model thinks before answering (slower, better for refine).
-                   False = model answers directly (faster, for draft passes).
+            model: Override the default model name.
+            temperature: Sampling temperature (0.0 = deterministic).
+            format_json: Request JSON-formatted output via response_format.
+            think: Ignored — kept for interface compatibility with Ollama.
         """
-        url = f"{self.base_url}/api/chat"
+        url = f"{self.base_url}/chat/completions"
         payload: dict = {
             "model": model or self.model,
             "messages": [m.to_dict() for m in messages],
-            "stream": False,
-            "options": {
-                "temperature": temperature,
-            },
+            "temperature": temperature,
         }
         if format_json:
-            payload["format"] = "json"
-        if think is not None:
-            payload["think"] = think
+            payload["response_format"] = {"type": "json_object"}
 
-        logger.debug("Ollama chat request", model=payload["model"], messages=len(messages), think=think)
+        headers = {
+            "Content-Type": "application/json",
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        logger.debug(
+            "OpenAI-compatible chat request",
+            url=url,
+            model=payload["model"],
+            messages=len(messages),
+            format_json=format_json,
+        )
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload) as resp:
+                async with session.post(url, json=payload, headers=headers) as resp:
                     if resp.status != 200:
                         error_body = await resp.text()
-                        logger.error("Ollama error", status=resp.status, body=error_body)
-                        raise RuntimeError(f"Ollama returned {resp.status}: {error_body}")
-                    data = await resp.json()
-                    msg = data.get("message", {})
-                    content = msg.get("content", "")
-                    # Log thinking trace if present (for debugging / refine pass)
-                    thinking = msg.get("thinking")
-                    if thinking:
-                        logger.debug(
-                            "Ollama thinking trace",
-                            model=payload["model"],
-                            thinking_length=len(thinking),
+                        logger.error(
+                            "LLM API error",
+                            status=resp.status,
+                            body=error_body,
+                            url=url,
                         )
+                        raise RuntimeError(
+                            f"LLM API returned {resp.status} from {url}: {error_body}"
+                        )
+                    data = await resp.json()
+                    choices = data.get("choices", [])
+                    if not choices:
+                        raise RuntimeError(
+                            f"LLM API returned empty choices from {url}: {json.dumps(data)[:500]}"
+                        )
+                    content = choices[0].get("message", {}).get("content", "")
+                    usage = data.get("usage", {})
                     logger.debug(
-                        "Ollama response received",
+                        "LLM response received",
                         model=payload["model"],
-                        tokens=data.get("eval_count"),
+                        prompt_tokens=usage.get("prompt_tokens"),
+                        completion_tokens=usage.get("completion_tokens"),
                         content_length=len(content),
-                        had_thinking=bool(thinking),
                     )
                     return content
 
         except aiohttp.ClientError as e:
-            logger.error("Ollama connection error", error=str(e))
-            raise RuntimeError(f"Cannot connect to Ollama at {self.base_url}: {e}") from e
+            logger.error("LLM API connection error", error=str(e), url=url)
+            raise RuntimeError(
+                f"Cannot connect to LLM API at {self.base_url}: {e}"
+            ) from e
 
     async def chat_stream(
         self,
@@ -171,46 +190,67 @@ class OllamaProvider(LLMProvider):
         temperature: float = 0.3,
         think: Optional[bool] = None,
     ) -> AsyncGenerator[str, None]:
-        """Stream Ollama /api/chat responses token by token.
+        """Stream /v1/chat/completions responses token by token (SSE).
 
-        Note: thinking tokens are not yielded — only content tokens.
-        This keeps the streaming output clean for consumers.
+        Yields content delta tokens as they arrive.
         """
-        url = f"{self.base_url}/api/chat"
+        url = f"{self.base_url}/chat/completions"
         payload = {
             "model": model or self.model,
             "messages": [m.to_dict() for m in messages],
+            "temperature": temperature,
             "stream": True,
-            "options": {
-                "temperature": temperature,
-            },
         }
-        if think is not None:
-            payload["think"] = think
+
+        headers = {
+            "Content-Type": "application/json",
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload) as resp:
+                async with session.post(url, json=payload, headers=headers) as resp:
                     if resp.status != 200:
                         error_body = await resp.text()
-                        raise RuntimeError(f"Ollama returned {resp.status}: {error_body}")
+                        raise RuntimeError(
+                            f"LLM API returned {resp.status}: {error_body}"
+                        )
 
-                    async for line in resp.content:
-                        line_text = line.decode("utf-8").strip()
-                        if not line_text:
-                            continue
-                        try:
-                            chunk = json.loads(line_text)
-                            msg = chunk.get("message", {})
-                            # Yield content tokens only (skip thinking tokens in stream)
-                            token = msg.get("content", "")
-                            if token:
-                                yield token
-                            if chunk.get("done", False):
+                    # Parse SSE stream: "data: {...}\n\n"
+                    buffer = ""
+                    async for chunk in resp.content:
+                        buffer += chunk.decode("utf-8")
+                        while "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
+                            line = line.strip()
+                            if not line:
+                                continue
+                            if line == "data: [DONE]":
                                 return
-                        except json.JSONDecodeError:
-                            continue
+                            if line.startswith("data: "):
+                                json_str = line[6:]
+                                try:
+                                    data = json.loads(json_str)
+                                    delta = (
+                                        data.get("choices", [{}])[0]
+                                        .get("delta", {})
+                                        .get("content", "")
+                                    )
+                                    if delta:
+                                        yield delta
+                                except json.JSONDecodeError:
+                                    continue
 
         except aiohttp.ClientError as e:
-            logger.error("Ollama stream connection error", error=str(e))
-            raise RuntimeError(f"Cannot connect to Ollama at {self.base_url}: {e}") from e
+            logger.error("LLM stream connection error", error=str(e))
+            raise RuntimeError(
+                f"Cannot connect to LLM API at {self.base_url}: {e}"
+            ) from e
+
+
+# ─── Convenience alias ────────────────────────────────────────────────────
+
+# Keep OllamaProvider as an alias for backward compatibility during migration
+# Will be removed in a future version
+OllamaProvider = OpenAIProvider

@@ -20,25 +20,62 @@ logger = get_logger(__name__)
 # Each entry: key, default, description, input_type, options, category
 
 DEFAULTS: List[dict] = [
-    # ── Ollama / LLM ──────────────────────────────
+    # ── LLM Provider ──────────────────────────────
+    {
+        "key": "provider",
+        "default": "openai",
+        "description": "Fournisseur LLM (openai, openrouter, together, custom)",
+        "input_type": "select",
+        "options": "openai,openrouter,together,custom,ollama",
+        "category": "llm",
+    },
+    {
+        "key": "openai_base_url",
+        "default": env_settings.openai_base_url,
+        "description": "URL de base de l'API compatible OpenAI",
+        "input_type": "url",
+        "category": "llm",
+    },
+    {
+        "key": "openai_api_key",
+        "default": "",
+        "description": "Clé API OpenAI / OpenRouter / Together",
+        "input_type": "password",
+        "category": "llm",
+    },
+    {
+        "key": "openai_model",
+        "default": env_settings.openai_model,
+        "description": "Modèle LLM pour la traduction",
+        "input_type": "text",
+        "category": "llm",
+    },
+    {
+        "key": "openai_refine_model",
+        "default": "",
+        "description": "Modèle pour la passe d'affinage (si différent, laisser vide = même modèle)",
+        "input_type": "text",
+        "category": "llm",
+    },
+    # ── Legacy Ollama settings (conservés pour compatibilité) ──
     {
         "key": "ollama_base_url",
         "default": env_settings.ollama_base_url,
-        "description": "URL du serveur Ollama sur le réseau",
+        "description": "[Déprécié] URL du serveur Ollama — utilisez openai_base_url à la place",
         "input_type": "url",
         "category": "llm",
     },
     {
         "key": "ollama_model",
         "default": env_settings.ollama_model,
-        "description": "Modèle LLM pour la traduction",
+        "description": "[Déprécié] Ancien modèle Ollama — utilisez openai_model",
         "input_type": "text",
         "category": "llm",
     },
     {
         "key": "ollama_refine_model",
         "default": env_settings.ollama_refine_model,
-        "description": "Modèle pour la passe d'affinage (si différent)",
+        "description": "[Déprécié] Ancien modèle d'affinage Ollama",
         "input_type": "text",
         "category": "llm",
     },
@@ -52,7 +89,7 @@ DEFAULTS: List[dict] = [
     {
         "key": "draft_think",
         "default": "false",
-        "description": "Activer le mode réflexion pour la passe de draft (plus lent, plus précis)",
+        "description": "[Déprécié] Ancien mode réflexion draft — ignoré avec les API OpenAI",
         "input_type": "select",
         "options": "true,false",
         "category": "llm",
@@ -60,7 +97,7 @@ DEFAULTS: List[dict] = [
     {
         "key": "refine_think",
         "default": "true",
-        "description": "Activer le mode réflexion pour la passe d'affinage (recommandé)",
+        "description": "[Déprécié] Ancien mode réflexion affinage — ignoré avec les API OpenAI",
         "input_type": "select",
         "options": "true,false",
         "category": "llm",
@@ -212,6 +249,7 @@ class SettingsService:
         "batch_size": {"type": "int", "min": 1, "max": 100},
         "llm_temperature": {"type": "float", "min": 0.0, "max": 2.0},
         "ollama_base_url": {"type": "url"},
+        "openai_base_url": {"type": "url"},
     }
 
     def _validate_value(self, key: str, value: str) -> str:
@@ -267,7 +305,7 @@ class SettingsService:
         return await self.get_all(session)
 
     async def test_ollama_connection(self, base_url: Optional[str] = None) -> dict:
-        """Test connectivity to the Ollama server."""
+        """Test connectivity to the Ollama server (legacy)."""
         import aiohttp
 
         url = (base_url or await self.get_async("ollama_base_url")).rstrip("/")
@@ -279,6 +317,38 @@ class SettingsService:
                         models = [m.get("name", "") for m in data.get("models", [])]
                         return {"ok": True, "models": models}
                     return {"ok": False, "error": f"HTTP {resp.status}"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    async def test_openai_connection(self, base_url: Optional[str] = None, api_key: Optional[str] = None) -> dict:
+        """Test connectivity to an OpenAI-compatible API by listing models."""
+        import aiohttp
+
+        url = (base_url or await self.get_async("openai_base_url")).rstrip("/")
+        key = api_key or await self.get_async("openai_api_key") or ""
+
+        models_url = f"{url}/models"
+        headers = {}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    models_url,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        # OpenAI returns {"data": [{"id": "...", ...}]}
+                        raw_models = data.get("data", [])
+                        models = sorted(set(
+                            m.get("id", "") for m in raw_models if m.get("id")
+                        ))
+                        return {"ok": True, "models": models}
+                    error_body = await resp.text()
+                    return {"ok": False, "error": f"HTTP {resp.status}: {error_body[:500]}"}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 

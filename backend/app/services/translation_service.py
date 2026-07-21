@@ -119,9 +119,20 @@ class TranslationService:
                 # Fallback: keep original lines
                 translated.extend(batch)
 
-            # Update progress
+            # Update progress & live feed
             progress = int(((i + len(batch)) / total) * 100)
             task.progress_pct = min(progress, 99)  # Keep at 99 until fully done
+            task.translated_lines = len(translated)
+
+            # Write partial draft SRT for live preview
+            if task.draft_path and translated:
+                try:
+                    from app.services.subtitle_service import ParsedSubtitle
+                    draft_parsed = ParsedSubtitle(lines=list(translated), format=parsed.format)
+                    self.subtitle_service.write_srt(translated, task.draft_path)
+                except Exception as e:
+                    logger.warning("Failed to write draft SRT", path=task.draft_path, error=str(e))
+
             logger.debug("Translation progress", pct=task.progress_pct, lines_done=len(translated))
             if db_session:
                 await db_session.commit()
@@ -138,6 +149,8 @@ class TranslationService:
             )
 
         task.progress_pct = 100
+        if db_session:
+            await db_session.commit()
         logger.info("Translation complete", task_id=task.id, lines=total)
         return translated
 
@@ -364,6 +377,9 @@ class TranslationService:
             if db_session:
                 await db_session.commit()
 
+        task.progress_pct = 100
+        if db_session:
+            await db_session.commit()
         logger.info("Refine pass complete", task_id=task.id, lines=len(refined))
         return refined
 

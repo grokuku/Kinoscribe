@@ -1,16 +1,17 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Trash2, Languages, Download,
   Film, Brain, FileText, ChevronDown, Mic, RefreshCw,
   Sparkles, ArrowRightLeft, AlertCircle, Loader2, X, Check,
-  HardDriveDownload, Disc, Clock, Play,
+  HardDriveDownload, Disc, Clock, Play, Eye,
 } from 'lucide-react';
-import { useFilm, useTasks, useActiveTaskPolling } from '../hooks/useApi';
+import { useFilm, useTasks, useActiveTaskPolling, useTaskContent } from '../hooks/useApi';
 import { api } from '../api/client';
 import { StatusBadge, TaskProgressBar } from '../components/TaskStatus';
 import SubtitleUploader from '../components/SubtitleUploader';
-import type { Task, Character, GlossaryEntry, ExistingSubtitle, TrackInfo, TranslationVersion } from '../types';
+import SubtitleViewer from '../components/SubtitleViewer';
+import type { Task, Character, GlossaryEntry, ExistingSubtitle, TrackInfo, TranslationVersion, SubtitleLine } from '../types';
 
 // ─── Toast / Confirm system ──────────────────────────────────────────────
 
@@ -71,7 +72,7 @@ export default function FilmDetailPage() {
   const { data: film, loading, error, refresh: refreshFilm } = useFilm(id!);
   const { tasks: polledTasks, hasActive } = useActiveTaskPolling(3000);
   const { data: staticTasks, refresh: refreshTasks } = useTasks();
-  const filmTasks = (hasActive ? (polledTasks ?? []) : (staticTasks ?? [])).filter(t => t.film_id === id);
+  const filmTasks = (polledTasks ?? staticTasks ?? []).filter(t => t.film_id === id);
 
   const [uploading, setUploading] = useState(false);
   const [starting, setStarting] = useState<string | null>(null);
@@ -88,6 +89,12 @@ export default function FilmDetailPage() {
   const [rescanning, setRescanning] = useState(false);
   const [enriching, setEnriching] = useState(false);
   const [translations, setTranslations] = useState<TranslationVersion[]>([]);
+  // ── Preview modal state ──
+  const [previewTaskId, setPreviewTaskId] = useState<string | null>(null);
+  const [previewVersionPath, setPreviewVersionPath] = useState<string | null>(null);
+  const [previewVersionContent, setPreviewVersionContent] = useState<SubtitleLine[] | null>(null);
+  const [previewVersionLoading, setPreviewVersionLoading] = useState(false);
+  const { data: taskContentLines, loading: taskContentLoading } = useTaskContent(previewTaskId);
   const [open, setOpen] = useState<Record<string, boolean>>({ subs: true, tracks: false, whisper: false, video: false, pipeline: false, translations: false });
   const [pipelineDialog, setPipelineDialog] = useState(false);
   const [pipelineSteps, setPipelineSteps] = useState({ extract: true, transcribe: true, analyze: true, translate: true, install: true });
@@ -232,6 +239,36 @@ export default function FilmDetailPage() {
     finally { setInstalling(null); }
   };
 
+  // ── Preview handlers ──
+  const openTaskPreview = useCallback((taskId: string) => {
+    setPreviewTaskId(taskId);
+    setPreviewVersionPath(null);
+    setPreviewVersionContent(null);
+  }, []);
+
+  const openVersionPreview = useCallback(async (path: string) => {
+    if (!id) return;
+    setPreviewVersionPath(path);
+    setPreviewTaskId(null);
+    setPreviewVersionLoading(true);
+    setPreviewVersionContent(null);
+    try {
+      const result = await api.readTranslationContent(id, path);
+      setPreviewVersionContent(result.lines);
+    } catch (e: any) {
+      toast.error('Erreur lecture : ' + e.message);
+      setPreviewVersionPath(null);
+    } finally {
+      setPreviewVersionLoading(false);
+    }
+  }, [id]);
+
+  const closePreview = useCallback(() => {
+    setPreviewTaskId(null);
+    setPreviewVersionPath(null);
+    setPreviewVersionContent(null);
+  }, []);
+
   const handleDelete = async () => {
     if (!await confirm('Supprimer ce film ?')) return;
     await api.deleteFilm(film!.id); navigate('/');
@@ -255,7 +292,74 @@ export default function FilmDetailPage() {
         steps={pipelineSteps}
         setStep={(k, v) => setPipelineSteps(s => ({ ...s, [k]: v }))}
       />
-      <div className="page-container max-w-5xl">
+
+      {/* ── Preview modal (task-based) ── */}
+      {previewTaskId && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+          onClick={closePreview}
+        >
+          <div
+            className="glass-card w-full max-w-4xl max-h-[85vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-white/[0.06]">
+              <h3 className="text-lg font-semibold text-gray-100">Aperçu du sous-titre</h3>
+              <button onClick={closePreview} className="btn-ghost p-1.5">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="overflow-y-auto flex-1 p-6 pt-4">
+              {taskContentLoading && (
+                <div className="flex items-center justify-center py-16">
+                  <Loader2 className="w-8 h-8 text-brand-400 animate-spin" />
+                </div>
+              )}
+              {!taskContentLoading && taskContentLines && (
+                <SubtitleViewer lines={taskContentLines} loading={false} />
+              )}
+              {!taskContentLoading && !taskContentLines && (
+                <div className="py-16 text-center text-gray-500">Aucun contenu disponible.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Preview modal (version-based) ── */}
+      {previewVersionPath && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+          onClick={closePreview}
+        >
+          <div
+            className="glass-card w-full max-w-4xl max-h-[85vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-white/[0.06]">
+              <h3 className="text-lg font-semibold text-gray-100">Aperçu du sous-titre</h3>
+              <button onClick={closePreview} className="btn-ghost p-1.5">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="overflow-y-auto flex-1 p-6 pt-4">
+              {previewVersionLoading && (
+                <div className="flex items-center justify-center py-16">
+                  <Loader2 className="w-8 h-8 text-brand-400 animate-spin" />
+                </div>
+              )}
+              {!previewVersionLoading && previewVersionContent && (
+                <SubtitleViewer lines={previewVersionContent} loading={false} />
+              )}
+              {!previewVersionLoading && !previewVersionContent && (
+                <div className="py-16 text-center text-gray-500">Aucun contenu disponible.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="page-container">
 
         {/* ─── Header ─────────────────────────────────────────────────── */}
         <div className="flex items-center gap-3 mb-8">
@@ -296,9 +400,14 @@ export default function FilmDetailPage() {
                 </span>
                 <TaskProgressBar status={task.status} progress={task.progress_pct} />
                 {task.status === 'completed' && task.target_path && (
-                  <button onClick={() => handleInstall(task.id)} disabled={installing === task.id} className="btn-secondary !text-xs">
-                    <HardDriveDownload className="w-3 h-3" /> Installer
-                  </button>
+                  <>
+                    <button onClick={() => openTaskPreview(task.id)} className="btn-ghost !text-xs !p-1.5" title="Aperçu">
+                      <Eye className="w-3.5 h-3.5" />
+                    </button>
+                    <button onClick={() => handleInstall(task.id)} disabled={installing === task.id} className="btn-secondary !text-xs">
+                      <HardDriveDownload className="w-3 h-3" /> Installer
+                    </button>
+                  </>
                 )}
               </div>
             ))}
@@ -455,6 +564,13 @@ export default function FilmDetailPage() {
                           {v.filename.includes('.improved.') && <span className="ml-1 text-violet-400">(amélioré)</span>}
                         </p>
                       </div>
+                      <button
+                        onClick={() => openVersionPreview(v.path)}
+                        className="btn-ghost !text-xs !p-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                        title={`Aperçu de ${v.filename}`}
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                      </button>
                       <button
                         onClick={() => handleInstallVersion(v.path)}
                         disabled={installing !== null}

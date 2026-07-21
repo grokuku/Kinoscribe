@@ -81,8 +81,20 @@ export const api = {
   startTranslation: (taskId: string, body?: object) =>
     request<TaskProgress>(`/tasks/${taskId}/start`, { method: 'POST', body: JSON.stringify(body || {}) }),
   listTasks: () => request<Task[]>('/tasks/'),
+  fetchTasks: (params?: { limit?: number; status?: string; film_id?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.limit) q.set('limit', String(params.limit));
+    if (params?.status) q.set('status', params.status);
+    if (params?.film_id) q.set('film_id', String(params.film_id));
+    const qs = q.toString();
+    return request<Task[]>(`/tasks/${qs ? '?' + qs : ''}`);
+  },
   getTask: (id: string) => request<Task>(`/tasks/${id}`),
   getTaskProgress: (id: string) => request<TaskProgress>(`/tasks/${id}/progress`),
+  deleteTask: (taskId: string) =>
+    request<void>(`/tasks/${taskId}`, { method: 'DELETE' }),
+  fetchTaskContent: (taskId: string) =>
+    request<SubtitleLine[]>(`/tasks/${taskId}/content`),
   getGlossary: (taskId: string) =>
     request<GlossaryEntry[]>(`/tasks/${taskId}/glossary`),
   installSubtitle: (taskId: string) =>
@@ -93,6 +105,11 @@ export const api = {
     request<{ film_id: string; target_language: string; versions: TranslationVersion[] }>(`/films/${filmId}/translations`),
   installTranslation: (filmId: string, path: string) =>
     request<{ status: string; film_id: string; source: string; destination: string; backup: string | null }>(`/films/${filmId}/translations/install`, {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    }),
+  readTranslationContent: (filmId: string, path: string) =>
+    request<{ filename: string; raw_text: string; lines: SubtitleLine[]; line_count: number }>(`/films/${filmId}/translations/content`, {
       method: 'POST',
       body: JSON.stringify({ path }),
     }),
@@ -116,6 +133,12 @@ export const api = {
     request<{ ok: boolean; models: string[]; error?: string }>(
       `/settings/ollama-models?base_url=${encodeURIComponent(baseUrl)}`
     ),
+  // OpenAI-compatible endpoints
+  testOpenAI: () => request<{ ok: boolean; models?: string[]; error?: string }>('/settings/test-openai', { method: 'POST' }),
+  fetchOpenAIModels: (baseUrl: string, apiKey?: string) =>
+    request<{ ok: boolean; models: string[]; error?: string }>(
+      `/settings/openai-models?base_url=${encodeURIComponent(baseUrl)}${apiKey ? `&api_key=${encodeURIComponent(apiKey)}` : ''}`
+    ),
 };
 
-import type { Character, Task, TaskProgress, GlossaryEntry, Setting, ExistingSubtitle, TrackInfo, ExtractedTrack, WorkFiles, TranslationVersion } from '../types';
+import type { Character, Task, TaskProgress, GlossaryEntry, Setting, ExistingSubtitle, TrackInfo, ExtractedTrack, WorkFiles, TranslationVersion, SubtitleLine } from '../types';

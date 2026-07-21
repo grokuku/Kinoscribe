@@ -20,7 +20,12 @@ class Settings(BaseSettings):
     # ─── Database ──────────────────────────────────────
     database_url: str = "sqlite+aiosqlite:///./data/subtitle_translator.db"
 
-    # ─── LLM / Ollama ─────────────────────────────────
+    # ─── LLM / OpenAI-compatible ───────────────────────
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o-mini"
+
+    # ─── Legacy Ollama (kept for backward compat) ───────
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3"
     ollama_refine_model: str = "llama3"

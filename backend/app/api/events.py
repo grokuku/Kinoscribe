@@ -27,11 +27,21 @@ router = APIRouter(prefix="/events", tags=["events"])
 _connected_clients: set[str] = set()
 
 
-async def task_events_generator(request: Request) -> AsyncGenerator[str, None]:
+_ACTIVE_STATUSES = {
+    "pending", "analyzing_context", "translating", "refining",
+    "extracting", "transcribing", "syncing", "rescanning",
+    "installing",
+}
+
+
+async def task_events_generator(request: Request, limit: int = 50) -> AsyncGenerator[str, None]:
     """
     Generate SSE events for task progress.
 
-    Sends an event every second with a snapshot of all active tasks.
+    Sends an event every second with a snapshot of active/recent tasks.
+    Only returns:
+    - Tasks with active status (pending, running, etc.)
+    - The N most recent completed/failed tasks (default: 50)
     When no tasks are active, sends a heartbeat every 5 seconds.
     """
     client_id = id(request)
@@ -44,16 +54,35 @@ async def task_events_generator(request: Request) -> AsyncGenerator[str, None]:
             if await request.is_disconnected():
                 break
 
-            # Fetch current task states
+            # Fetch current task states: active tasks + N most recent
             async with async_session() as session:
-                result = await session.execute(
-                    select(TranslationTask).order_by(TranslationTask.created_at.desc())
+                # Get active tasks (no limit — all active tasks matter)
+                active_result = await session.execute(
+                    select(TranslationTask)
+                    .where(TranslationTask.status.in_(_ACTIVE_STATUSES))
+                    .order_by(TranslationTask.created_at.desc())
                 )
-                tasks = result.scalars().all()
+                active_tasks = active_result.scalars().all()
+
+                # Get recent completed/failed tasks (up to limit)
+                recent_result = await session.execute(
+                    select(TranslationTask)
+                    .where(~TranslationTask.status.in_(_ACTIVE_STATUSES))
+                    .order_by(TranslationTask.created_at.desc())
+                    .limit(limit)
+                )
+                recent_tasks = recent_result.scalars().all()
+
+            # Merge: active first, then recent
+            seen_ids = set()
+            tasks = []
+            for t in active_tasks + recent_tasks:
+                if t.id not in seen_ids:
+                    seen_ids.add(t.id)
+                    tasks.append(t)
 
             # Build event data
-            active_statuses = {"pending", "analyzing_context", "translating", "refining", "extracting", "transcribing", "syncing", "rescanning"}
-            active = any(t.status in active_statuses for t in tasks)
+            active = bool(active_tasks)
 
             events = []
             for task in tasks:
@@ -65,6 +94,8 @@ async def task_events_generator(request: Request) -> AsyncGenerator[str, None]:
                     "progress_pct": task.progress_pct,
                     "error_message": task.error_message,
                     "source_filename": task.source_filename,
+                    "total_lines": task.total_lines,
+                    "translated_lines": task.translated_lines,
                 })
 
             data = json.dumps({
@@ -86,12 +117,15 @@ async def task_events_generator(request: Request) -> AsyncGenerator[str, None]:
 
 
 @router.get("")
-async def task_events(request: Request):
+async def task_events(
+    request: Request,
+    limit: int = 50,
+):
     """SSE endpoint for real-time task progress updates."""
     from fastapi.responses import StreamingResponse
 
     return StreamingResponse(
-        task_events_generator(request),
+        task_events_generator(request, limit=limit),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

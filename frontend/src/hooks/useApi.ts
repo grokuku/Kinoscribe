@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import type { Film, Task, TaskProgress, GlossaryEntry } from '../types';
+import type { Film, Task, TaskProgress, GlossaryEntry, SubtitleLine } from '../types';
 import { api } from '../api/client';
 
 /** Generic fetch-on-mount hook */
@@ -35,12 +35,104 @@ export function useFilm(id: string) {
   return useFetch<Film>(() => api.getFilm(id), [id]);
 }
 
-export function useTasks() {
-  return useFetch<Task[]>(() => api.listTasks());
+export function useTasks(filters?: { limit?: number; status?: string; film_id?: number }) {
+  return useFetch<Task[]>(() => api.fetchTasks(filters), [JSON.stringify(filters)]);
 }
 
 export function useTask(id: string) {
   return useFetch<Task>(() => api.getTask(id), [id]);
+}
+
+/**
+ * Mutation hook to delete a task.
+ * Returns a callback that performs the deletion.
+ */
+export function useDeleteTask() {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const deleteTask = useCallback(async (taskId: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      await api.deleteTask(taskId);
+    } catch (e: any) {
+      setError(e.message || 'Failed to delete task');
+      throw e;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return { deleteTask, loading, error };
+}
+
+/**
+ * Hook to fetch the content (SRT lines) of a completed task.
+ */
+export function useTaskContent(taskId: string | null) {
+  return useFetch<SubtitleLine[] | null>(async () => {
+    if (!taskId) return null;
+    return api.fetchTaskContent(taskId);
+  }, [taskId]);
+}
+
+/**
+ * Polls task content (SRT lines) every `intervalMs` while the task is active.
+ * Stops polling automatically when the task reaches a terminal state.
+ * Returns the live lines, loading/error state, the current task status, and progress.
+ */
+export function useLiveTranslation(taskId: string, intervalMs = 2500) {
+  const [lines, setLines] = useState<SubtitleLine[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // Use the existing polling hook for status/progress
+  const { progress } = useTaskPolling(taskId, 2000);
+
+  const isActive = progress !== null && !['completed', 'failed'].includes(progress.status);
+
+  useEffect(() => {
+    if (!taskId) return;
+
+    let cancelled = false;
+
+    const fetchLines = async () => {
+      try {
+        const content = await api.fetchTaskContent(taskId);
+        if (!cancelled) {
+          if (content) setLines(content);
+          setError(null);
+        }
+      } catch (e: any) {
+        if (!cancelled) setError(e.message || 'Failed to fetch content');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    fetchLines(); // immediate first call
+
+    // Only poll while the task is active
+    if (isActive) {
+      const interval = setInterval(fetchLines, intervalMs);
+      return () => {
+        cancelled = true;
+        clearInterval(interval);
+      };
+    } else {
+      return () => { cancelled = true; };
+    }
+  }, [taskId, isActive, intervalMs]);
+
+  return {
+    lines,
+    loading,
+    error,
+    taskStatus: progress?.status ?? null,
+    progress: progress?.progress_pct ?? 0,
+    isActive,
+  };
 }
 
 export function useGlossary(taskId: string) {

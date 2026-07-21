@@ -173,6 +173,11 @@ class TranslationTask(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
+    # Live progress tracking (draft SRT for incremental feed)
+    draft_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    total_lines: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    translated_lines: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     film: Mapped["Film"] = relationship(back_populates="tasks")
 
 

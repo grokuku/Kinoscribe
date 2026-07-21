@@ -106,6 +106,21 @@ async def _migrate_phase5() -> None:
                     f"ALTER TABLE library_sources ADD COLUMN {col_name} {col_type}"
                 ))
 
+        # ── Phase 8: Live translation feed columns ──
+        result = await conn.execute(sqlalchemy.text("PRAGMA table_info(translation_tasks)"))
+        task_cols = {row[1] for row in result}
+
+        live_columns = {
+            "draft_path": "TEXT",
+            "total_lines": "INTEGER",
+            "translated_lines": "INTEGER",
+        }
+        for col_name, col_type in live_columns.items():
+            if col_name not in task_cols:
+                await conn.execute(sqlalchemy.text(
+                    f"ALTER TABLE translation_tasks ADD COLUMN {col_name} {col_type}"
+                ))
+
         # ── Phase 7: Normalize mount points and reset stale mount status ──
         # Old code stored non-normalized paths like /app/app/services/../../data/mounts/...
         # Reset all mount statuses so they get re-mounted with correct paths on next scan.

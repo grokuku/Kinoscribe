@@ -4,7 +4,7 @@ Translation task routes: start, monitor, download.
 
 import os
 import asyncio
-from typing import List
+from typing import List, Optional
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Body
@@ -16,7 +16,7 @@ from app.services.task_runner import start_task
 from app.core.database import get_session
 from app.models.database import Film, TranslationTask, TaskStatusEnum, GlossaryEntry
 from app.models.schemas import TaskOut, TaskProgressOut, GlossaryEntryOut
-from app.services.llm_provider import OllamaProvider
+from app.services.llm_provider import OpenAIProvider
 from app.services.subtitle_service import SubtitleService
 from app.services.context_service import ContextService
 from app.services.translation_service import TranslationService
@@ -26,9 +26,9 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
 
-def _build_services_from_settings(base_url: str, model: str, cps_limit: int):
+def _build_services_from_settings(base_url: str, api_key: str, model: str, cps_limit: int):
     """Create service instances using runtime settings from DB."""
-    llm = OllamaProvider(base_url=base_url, model=model)
+    llm = OpenAIProvider(base_url=base_url, api_key=api_key, model=model)
     sub_svc = SubtitleService(cps_limit=cps_limit)
     ctx = ContextService(llm)
     tx = TranslationService(llm, ctx, sub_svc)
@@ -92,7 +92,11 @@ async def upload_subtitle_and_start(
     await session.commit()
     await session.refresh(task)
 
-    return task
+    # Include film title in response
+    out = TaskOut.model_validate(task)
+    if film:
+        out.film_title = film.title
+    return out
 
 
 @router.post("/{film_id}/translate-existing", response_model=TaskOut, status_code=201)
@@ -178,7 +182,11 @@ async def translate_existing_subtitle(
     await session.refresh(task)
 
     logger.info("Task from existing subtitle", film_id=film_id, task_type=task_type, path=subtitle_path, lang=source_language)
-    return task
+
+    out = TaskOut.model_validate(task)
+    if film:
+        out.film_title = film.title
+    return out
 
 
 @router.post("/{task_id}/start", response_model=TaskProgressOut)
@@ -223,11 +231,45 @@ async def start_translation(
 
 @router.get("/", response_model=List[TaskOut])
 async def list_tasks(
+    limit: int = 50,
+    status: Optional[str] = None,
+    film_id: Optional[str] = None,
     session: AsyncSession = Depends(get_session),
 ):
-    """List all translation tasks."""
-    result = await session.execute(select(TranslationTask))
-    return result.scalars().all()
+    """
+    List translation tasks, ordered by created_at DESC.
+
+    Supports optional filters and pagination:
+    - limit: max number of tasks (default 50)
+    - status: filter by task status (e.g. "pending", "completed", "failed")
+    - film_id: filter by film ID
+    """
+    query = (
+        select(
+            TranslationTask,
+            Film.title.label("film_title"),
+        )
+        .join(Film, TranslationTask.film_id == Film.id, isouter=True)
+        .order_by(TranslationTask.created_at.desc())
+    )
+
+    if status is not None:
+        query = query.where(TranslationTask.status == status)
+    if film_id is not None:
+        query = query.where(TranslationTask.film_id == film_id)
+
+    query = query.limit(limit)
+
+    result = await session.execute(query)
+    rows = result.all()
+
+    tasks_out: List[TaskOut] = []
+    for task, film_title in rows:
+        out = TaskOut.model_validate(task)
+        out.film_title = film_title
+        tasks_out.append(out)
+
+    return tasks_out
 
 
 @router.get("/{task_id}", response_model=TaskOut)
@@ -239,7 +281,13 @@ async def get_task(
     task = await session.get(TranslationTask, task_id)
     if not task:
         raise HTTPException(404, "Task not found")
-    return task
+
+    # Fetch film title for convenience
+    film = await session.get(Film, task.film_id)
+    out = TaskOut.model_validate(task)
+    if film:
+        out.film_title = film.title
+    return out
 
 
 @router.get("/{task_id}/progress", response_model=TaskProgressOut)
@@ -290,6 +338,134 @@ async def download_translated_subtitle(
         filename=task.target_filename or "translated.srt",
         media_type="application/octet-stream",
     )
+
+
+@router.delete("/{task_id}")
+async def delete_task(
+    task_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """Delete a translation task.
+
+    Optionally removes associated files (draft_path, target_path) if they exist.
+    """
+    task = await session.get(TranslationTask, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+
+    # Remove associated files if they exist
+    if task.source_path and os.path.exists(task.source_path):
+        try:
+            os.remove(task.source_path)
+            logger.info("Deleted source file", task_id=task_id, path=task.source_path)
+        except OSError as e:
+            logger.warning("Could not delete source file", task_id=task_id, path=task.source_path, error=str(e))
+
+    if task.target_path and os.path.exists(task.target_path):
+        try:
+            os.remove(task.target_path)
+            logger.info("Deleted target file", task_id=task_id, path=task.target_path)
+        except OSError as e:
+            logger.warning("Could not delete target file", task_id=task_id, path=task.target_path, error=str(e))
+
+    if task.draft_path and os.path.exists(task.draft_path):
+        try:
+            os.remove(task.draft_path)
+            logger.info("Deleted draft file", task_id=task_id, path=task.draft_path)
+        except OSError as e:
+            logger.warning("Could not delete draft file", task_id=task_id, path=task.draft_path, error=str(e))
+
+    await session.delete(task)
+    await session.commit()
+
+    logger.info("Task deleted", task_id=task_id)
+    return {"status": "deleted"}
+
+
+@router.get("/{task_id}/content")
+async def get_task_content(
+    task_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    Retrieve the translated content of a task.
+
+    If target_path exists, reads the SRT file and returns its content.
+    Bonus: parses the SRT and returns structured JSON with index, start, end, text.
+    """
+    task = await session.get(TranslationTask, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+
+    is_completed = task.status == TaskStatusEnum.completed
+
+    # Determine which file to read:
+    # - If completed, read target_path
+    # - If still running/has draft, read draft_path
+    # - Fallback: target_path if it exists
+    content_path = None
+    if is_completed and task.target_path and os.path.exists(task.target_path):
+        content_path = task.target_path
+    elif task.draft_path and os.path.exists(task.draft_path):
+        content_path = task.draft_path
+    elif task.target_path and os.path.exists(task.target_path):
+        content_path = task.target_path
+
+    if not content_path:
+        # If task is pending/failed with no output, return empty
+        if task.status in ("pending", "failed") or not is_completed:
+            return {
+                "task_id": task_id,
+                "filename": task.source_filename,
+                "raw_text": "",
+                "lines": [],
+                "line_count": 0,
+                "total_lines": task.total_lines or 0,
+                "translated_lines": task.translated_lines or 0,
+            }
+        raise HTTPException(404, "Output file not found — task may not be completed yet")
+
+    # Read / parse the subtitle file
+    try:
+        from app.services.subtitle_service import SubtitleService
+        svc = SubtitleService()
+        parsed = svc.parse_file(content_path)
+    except Exception as e:
+        logger.error("Failed to parse subtitle file", task_id=task_id, path=content_path, error=str(e))
+        raise HTTPException(500, f"Failed to read subtitle file: {str(e)[:200]}")
+
+    # Build structured response
+    lines = []
+    raw_text_parts = []
+    for line in parsed.lines:
+        if not line.is_empty:
+            lines.append({
+                "index": line.index,
+                "start": line.start,
+                "end": line.end,
+                "text": line.text,
+            })
+            raw_text_parts.append(line.text)
+        else:
+            lines.append({
+                "index": line.index,
+                "start": "",
+                "end": "",
+                "text": "",
+            })
+
+    display_filename = task.target_filename or os.path.basename(content_path)
+
+    return {
+        "task_id": task_id,
+        "filename": display_filename,
+        "raw_text": "\n\n".join(raw_text_parts),
+        "lines": lines,
+        "line_count": len([l for l in lines if l["text"]]),
+        "total_lines": task.total_lines or 0,
+        "translated_lines": task.translated_lines or 0,
+        "draft": not is_completed,  # flag indicating this is a partial preview
+    }
 
 
 @router.post("/{task_id}/install")
@@ -353,9 +529,10 @@ async def _run_translation_workflow(task_id: str):
         await settings_service.seed_if_empty(session)
 
         # Read runtime config from DB
-        ollama_url = await settings_service.get(session, "ollama_base_url")
-        ollama_model = await settings_service.get(session, "ollama_model")
-        ollama_refine_model = await settings_service.get(session, "ollama_refine_model")
+        base_url = await settings_service.get(session, "openai_base_url")
+        api_key = await settings_service.get(session, "openai_api_key")
+        model = await settings_service.get(session, "openai_model")
+        refine_model_raw = await settings_service.get(session, "openai_refine_model")
         cps_limit = await settings_service.get_int(session, "cps_limit")
         window_size = await settings_service.get_int(session, "sliding_window_size")
         batch_size = await settings_service.get_int(session, "batch_size")
@@ -365,10 +542,10 @@ async def _run_translation_workflow(task_id: str):
         refine_think = await settings_service.get_bool(session, "refine_think")
 
         # Use refine model if configured, otherwise same as draft model
-        refine_model = ollama_refine_model.strip() if ollama_refine_model and ollama_refine_model.strip() else None
+        refine_model = refine_model_raw.strip() if refine_model_raw and refine_model_raw.strip() else None
 
         # Build services with runtime settings
-        llm, ctx, tx, sub_svc = _build_services_from_settings(ollama_url, ollama_model, cps_limit)
+        llm, ctx, tx, sub_svc = _build_services_from_settings(base_url, api_key, model, cps_limit)
 
         task = await session.get(TranslationTask, task_id)
         if not task:
@@ -490,6 +667,11 @@ async def _run_translation_workflow(task_id: str):
 
             # ── Phase 3: Translation ────────────────────────────────
             task.status = TaskStatusEnum.translating
+            # Set live feed tracking fields
+            task.total_lines = len(parsed.lines)
+            task.translated_lines = 0
+            from app.services.workdir import film_work_dir
+            task.draft_path = os.path.join(film_work_dir(film.id), "draft.srt")
             await session.commit()
 
             # Pass runtime settings to translation
@@ -513,7 +695,7 @@ async def _run_translation_workflow(task_id: str):
                     model=refine_model,
                     think=refine_think,
                 )
-                refine_llm = OllamaProvider(base_url=ollama_url, model=refine_model)
+                refine_llm = OpenAIProvider(base_url=base_url, api_key=api_key, model=refine_model)
                 refine_ctx = ContextService(refine_llm)
                 refine_tx = TranslationService(refine_llm, refine_ctx, sub_svc)
                 translated_lines = await refine_tx.refine_translation(
@@ -568,9 +750,10 @@ async def _run_improve_workflow(task_id: str):
     async with async_session() as session:
         await settings_service.seed_if_empty(session)
 
-        ollama_url = await settings_service.get(session, "ollama_base_url")
-        ollama_model = await settings_service.get(session, "ollama_model")
-        ollama_refine_model = await settings_service.get(session, "ollama_refine_model")
+        base_url = await settings_service.get(session, "openai_base_url")
+        api_key = await settings_service.get(session, "openai_api_key")
+        model = await settings_service.get(session, "openai_model")
+        refine_model_raw = await settings_service.get(session, "openai_refine_model")
         cps_limit = await settings_service.get_int(session, "cps_limit")
         window_size = await settings_service.get_int(session, "sliding_window_size")
         batch_size = await settings_service.get_int(session, "batch_size")
@@ -579,9 +762,9 @@ async def _run_improve_workflow(task_id: str):
         refine_think = await settings_service.get_bool(session, "refine_think")
 
         # Use refine model for improvement pass
-        refine_model = ollama_refine_model.strip() if ollama_refine_model and ollama_refine_model.strip() else ollama_model
+        refine_model = refine_model_raw.strip() if refine_model_raw and refine_model_raw.strip() else model
 
-        llm = OllamaProvider(base_url=ollama_url, model=refine_model)
+        llm = OpenAIProvider(base_url=base_url, api_key=api_key, model=refine_model)
         ctx = ContextService(llm)
         sub_svc = SubtitleService(cps_limit=cps_limit)
         tx = TranslationService(llm, ctx, sub_svc)
@@ -677,6 +860,11 @@ async def _run_improve_workflow(task_id: str):
 
             # Translate (improve mode uses the source subtitle as both source and reference)
             task.status = TaskStatusEnum.translating
+            # Set live feed tracking fields
+            task.total_lines = len(parsed.lines)
+            task.translated_lines = 0
+            from app.services.workdir import film_work_dir
+            task.draft_path = os.path.join(film_work_dir(film.id), "draft.srt")
             await session.commit()
 
             translated_lines = await tx.translate_film_subtitles(
@@ -735,9 +923,10 @@ async def _run_pipeline_workflow(task_id: str, steps: dict = None):
     async with async_session() as session:
         await settings_service.seed_if_empty(session)
 
-        ollama_url = await settings_service.get(session, "ollama_base_url")
-        ollama_model = await settings_service.get(session, "ollama_model")
-        ollama_refine_model = await settings_service.get(session, "ollama_refine_model")
+        base_url = await settings_service.get(session, "openai_base_url")
+        api_key = await settings_service.get(session, "openai_api_key")
+        model = await settings_service.get(session, "openai_model")
+        refine_model_raw = await settings_service.get(session, "openai_refine_model")
         cps_limit = await settings_service.get_int(session, "cps_limit")
         window_size = await settings_service.get_int(session, "sliding_window_size")
         batch_size = await settings_service.get_int(session, "batch_size")
@@ -745,9 +934,9 @@ async def _run_pipeline_workflow(task_id: str, steps: dict = None):
         auto_clean_sdh = await settings_service.get_bool(session, "auto_clean_sdh")
         draft_think = await settings_service.get_bool(session, "draft_think")
         refine_think = await settings_service.get_bool(session, "refine_think")
-        refine_model = (ollama_refine_model or "").strip() or None
+        refine_model = (refine_model_raw or "").strip() or None
 
-        llm, ctx, tx, sub_svc = _build_services_from_settings(ollama_url, ollama_model, cps_limit)
+        llm, ctx, tx, sub_svc = _build_services_from_settings(base_url, api_key, model, cps_limit)
 
         task = await session.get(TranslationTask, task_id)
         if not task:
@@ -897,6 +1086,11 @@ async def _run_pipeline_workflow(task_id: str, steps: dict = None):
             # ── Step 4: Translation ─────────────────────────────────
             if run('translate'):
                 task.status = TaskStatusEnum.translating
+                # Set live feed tracking fields
+                task.total_lines = len(parsed.lines)
+                task.translated_lines = 0
+                from app.services.workdir import film_work_dir
+                task.draft_path = os.path.join(film_work_dir(film.id), "draft.srt")
                 await session.commit()
 
                 ref_tracks = None
@@ -933,7 +1127,7 @@ async def _run_pipeline_workflow(task_id: str, steps: dict = None):
                 if refine_model:
                     task.status = TaskStatusEnum.refining
                     await session.commit()
-                    refine_llm = OllamaProvider(base_url=ollama_url, model=refine_model)
+                    refine_llm = OpenAIProvider(base_url=base_url, api_key=api_key, model=refine_model)
                     refine_ctx = ContextService(refine_llm)
                     refine_tx = TranslationService(refine_llm, refine_ctx, sub_svc)
                     translated_lines = await refine_tx.refine_translation(
@@ -967,12 +1161,13 @@ async def _run_pipeline_workflow(task_id: str, steps: dict = None):
                         from app.services.install_service import find_film_source_dir
                         target_dir, err = await find_film_source_dir(film, session)
                         if target_dir:
-                            import pathlib
-                            film_folder = pathlib.Path(target_dir).name
+                            if not film.video_path:
+                                raise ValueError("Film has no video_path — cannot determine install location")
+                            video_basename = os.path.splitext(os.path.basename(film.video_path))[0]
                             ISO3 = {"fr": "fre", "en": "eng", "es": "spa", "de": "ger",
                                     "it": "ita", "pt": "por", "ja": "jpn", "ko": "kor", "zh": "chi"}
                             lang3 = ISO3.get(film.target_language, film.target_language)
-                            dest_name = f"{film_folder}.{lang3}.srt"
+                            dest_name = f"{video_basename}.{lang3}.srt"
                             dest_path = os.path.join(target_dir, dest_name)
                             import shutil
                             shutil.copy2(output_path, dest_path)

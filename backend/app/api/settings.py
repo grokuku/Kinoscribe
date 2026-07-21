@@ -1,5 +1,6 @@
 """
 Settings API routes: read, update, test connections.
+Supports both legacy Ollama and new OpenAI-compatible providers.
 """
 
 from typing import List
@@ -21,7 +22,6 @@ async def list_settings(
     session: AsyncSession = Depends(get_session),
 ):
     """Get all application settings."""
-    # Ensure seeded
     await settings_service.seed_if_empty(session)
     return await settings_service.get_all(session)
 
@@ -42,7 +42,7 @@ async def update_settings(
 
 @router.post("/test-ollama")
 async def test_ollama():
-    """Test connectivity to the configured Ollama server."""
+    """Test connectivity to the configured Ollama server (legacy)."""
     result = await settings_service.test_ollama_connection()
     if result["ok"]:
         logger.info("Ollama connection OK", models=result.get("models", []))
@@ -57,6 +57,35 @@ async def list_ollama_models(
 ):
     """Fetch the list of available models from a specific Ollama server URL."""
     result = await settings_service.test_ollama_connection(base_url)
+    if result["ok"]:
+        return {"ok": True, "models": result.get("models", [])}
+    return {"ok": False, "models": [], "error": result.get("error", "")}
+
+
+# ─── New OpenAI-compatible endpoints ──────────────────────────────────────
+
+
+@router.post("/test-openai")
+async def test_openai():
+    """Test connectivity to the configured OpenAI-compatible API."""
+    result = await settings_service.test_openai_connection()
+    if result["ok"]:
+        logger.info("OpenAI connection OK", models_count=len(result.get("models", [])))
+    else:
+        logger.warning("OpenAI connection failed", error=result.get("error"))
+    return result
+
+
+@router.get("/openai-models")
+async def list_openai_models(
+    base_url: str = Query(..., description="API base URL to query"),
+    api_key: str = Query("", description="Optional API key for authentication"),
+):
+    """Fetch the list of available models from an OpenAI-compatible API."""
+    result = await settings_service.test_openai_connection(
+        base_url=base_url,
+        api_key=api_key or None,
+    )
     if result["ok"]:
         return {"ok": True, "models": result.get("models", [])}
     return {"ok": False, "models": [], "error": result.get("error", "")}

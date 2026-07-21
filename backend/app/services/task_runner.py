@@ -97,6 +97,10 @@ async def recover_pending_tasks():
             elif task_type == 'improve':
                 from app.api.tasks import _run_improve_workflow
                 start_task(task.id, _run_improve_workflow(task.id))
+            elif task_type == 'pipeline':
+                # B-MAJ-5: handle pipeline task recovery
+                from app.api.tasks import _run_pipeline_workflow
+                start_task(task.id, _run_pipeline_workflow(task.id))
             else:
                 from app.api.tasks import _run_translation_workflow
                 start_task(task.id, _run_translation_workflow(task.id))

@@ -162,6 +162,7 @@ async def translate_existing_subtitle(
         filename = ""
         source_language = data.get("source_language") or film.source_language or "en"
         subtitle_path = ""
+        dest_path = ""  # B-CRIT-1: ensure dest_path is defined for pipeline tasks
         fmt = "srt"
 
     task = TranslationTask(
@@ -396,7 +397,14 @@ async def _run_translation_workflow(task_id: str):
             await session.commit()
 
             # Build character profiles
+            from app.models.database import Character
             characters = await ctx.build_character_profiles(film, parsed, sub_svc)
+            # B-MAJ-1: clean existing characters before re-adding (avoid duplicates on re-translation)
+            existing_chars = await session.execute(
+                select(Character).where(Character.film_id == film.id)
+            )
+            for c in existing_chars.scalars().all():
+                await session.delete(c)
             for c in characters:
                 session.add(c)
             film.characters = characters
@@ -422,6 +430,12 @@ async def _run_translation_workflow(task_id: str):
                     glossary_data.append(entry)
                     existing_terms.add(entry["source"].lower())
 
+            # B-MAJ-2: clean existing glossary entries before re-adding (avoid duplicates on re-translation)
+            existing_glossary = await session.execute(
+                select(GlossaryEntry).where(GlossaryEntry.film_id == film.id)
+            )
+            for eg in existing_glossary.scalars().all():
+                await session.delete(eg)
             for entry in glossary_data:
                 g = GlossaryEntry(
                     film_id=film.id,
@@ -759,10 +773,8 @@ async def _run_pipeline_workflow(task_id: str, steps: dict = None):
                 await session.commit()
 
                 from app.services.media_service import extract_all_subtitles, check_ffmpeg_available
-                from app.services.workdir import extracted_subs_dir
                 if check_ffmpeg_available():
-                    subs_dir = extracted_subs_dir(film.id)
-                    results = extract_all_subtitles(video_path, subs_dir)
+                    results = extract_all_subtitles(video_path, film.id, text_only=True)
                     extracted_count = len(results)
                     logger.info("Pipeline: subs extracted", count=extracted_count)
                 else:
@@ -837,7 +849,14 @@ async def _run_pipeline_workflow(task_id: str, steps: dict = None):
                 task.progress_pct = 30
                 await session.commit()
 
+                from app.models.database import Character
                 characters = await ctx.build_character_profiles(film, parsed, sub_svc)
+                # B-MAJ-3: clean existing characters before re-adding (avoid duplicates on re-run)
+                existing_chars = await session.execute(
+                    select(Character).where(Character.film_id == film.id)
+                )
+                for c in existing_chars.scalars().all():
+                    await session.delete(c)
                 for c in characters:
                     session.add(c)
                 film.characters = characters
@@ -854,6 +873,12 @@ async def _run_pipeline_workflow(task_id: str, steps: dict = None):
                 for entry in idiom_data:
                     if entry.get("source", "").lower() not in existing_terms:
                         glossary_data.append(entry)
+                # B-MAJ-2: clean existing glossary entries before re-adding
+                existing_glossary = await session.execute(
+                    select(GlossaryEntry).where(GlossaryEntry.film_id == film.id)
+                )
+                for eg in existing_glossary.scalars().all():
+                    await session.delete(eg)
                 for entry in glossary_data:
                     session.add(GlossaryEntry(
                         film_id=film.id,
@@ -1017,25 +1042,33 @@ async def _run_sync_workflow(task_id: str):
                 task.status = TaskStatusEnum.extracting
                 task.progress_pct = 10
                 await session.commit()
-                audio_path = await asyncio.to_thread(extract_audio_track, film.video_path, task.source_language or 'und')
+                # B-CRIT-4a: pass film.id as film_id and source_language as language
+                audio_lang = task.source_language or 'und'
+                audio_path = await asyncio.to_thread(
+                    extract_audio_track, film.video_path, film.id, None, audio_lang
+                )
 
             task.status = TaskStatusEnum.syncing
             task.progress_pct = 30
             await session.commit()
 
             # Run Whisper sync
-            ollama_url = await settings_service.get(session, "ollama_base_url")
             whisper_model = await settings_service.get(session, "whisper_model") or "medium"
+            # B-CRIT-4d: read whisperx_enabled setting and pass it to sync_with_whisper
+            whisperx_enabled = await settings_service.get_bool(session, "whisperx_enabled")
 
             result = await sync_with_whisper(
                 audio_path,
                 task.source_path,
                 film.id,
                 model_size=whisper_model,
+                use_whisperx=whisperx_enabled,
             )
 
             # Write output
             from app.services.workdir import output_dir as get_output_dir
+            # B-CRIT-4b: initialize output_path to None to avoid NameError
+            output_path = None
             # Result contains the synced subtitle path
             result_path = result.get("output_path") if isinstance(result, dict) else None
             if result_path and os.path.isfile(result_path):

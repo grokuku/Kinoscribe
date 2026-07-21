@@ -94,6 +94,7 @@ class TranslationService:
                             lore_summary=task.lore_summary or "",
                             think=think,
                             ref_tracks=ref_tracks,
+                            temperature=temperature,
                         )
                         translated.extend(translated_batch)
                         break
@@ -151,6 +152,7 @@ class TranslationService:
         think: Optional[bool] = False,
         ref_tracks: Optional[dict[str, dict[int, str]]] = None,
         source_language: str = "en",
+        temperature: float = 0.3,
     ) -> List[SubtitleLine]:
         """Translate a batch of lines with full context injection."""
 
@@ -224,7 +226,8 @@ class TranslationService:
             Message(role="user", content="\n".join(user_parts)),
         ]
 
-        raw = await self.llm.chat(messages, format_json=True, temperature=0.3, think=think)
+        # B-MAJ-4: use the temperature parameter instead of hardcoded 0.3
+        raw = await self.llm.chat(messages, format_json=True, temperature=temperature, think=think)
         parsed_response = self._parse_json_response(raw)
 
         # Build translated lines map

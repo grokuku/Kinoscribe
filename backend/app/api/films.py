@@ -709,7 +709,7 @@ async def analyze_film_context(
                 return
             try:
                 ollama_url = await settings_service.get(s, "ollama_base_url") or "http://ollama:11434"
-                ollama_model = await settings_service.get(s, "ollama_model") or "qwen3.5:397b-cloud"
+                ollama_model = await settings_service.get(s, "ollama_model") or "llama3"
                 llm = OllamaProvider(base_url=ollama_url, model=ollama_model)
                 ctx = ContextService(llm)
                 sub_svc = SubtitleService()

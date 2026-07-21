@@ -790,10 +790,14 @@ class ScannerService:
                             # For SSH sources, cache poster locally
                             is_ssh = source.source_type == 'ssh'
                             poster_local = None
-                            if is_ssh and entry.get('poster_file') and fs is not None:
-                                # Need film_id first — create/update film, then cache poster
-                                pass  # handled below after commit
+                            # B-CRIT-3: when SSH source is mounted, fs is LocalFilesystem,
+                            # so poster_file is a local path on the mount point.
+                            # Use it directly instead of skipping.
+                            if is_ssh and isinstance(fs, SSHFilesystem) and entry.get('poster_file'):
+                                # SSH not mounted — poster will be cached after commit
+                                pass
                             elif entry.get('poster_file'):
+                                # Local or SSH-mounted: poster_file is a usable local path
                                 poster_local = entry['poster_file']
 
                             if film:

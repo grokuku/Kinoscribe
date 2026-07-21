@@ -206,7 +206,7 @@ app.include_router(events_router, prefix="/api")
 async def root():
     return {
         "message": "Kinoscribe is running",
-         "version": "0.4.0",
+        "version": "0.4.1",
         "docs": "/docs",
     }
 

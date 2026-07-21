@@ -36,16 +36,12 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [ollamaTest, setOllamaTest] = useState<{ ok: boolean; models?: string[]; error?: string } | null>(null);
-  const [testing, setTesting] = useState(false);
+
   const [openaiTest, setOpenaiTest] = useState<{ ok: boolean; models?: string[]; error?: string } | null>(null);
   const [testingOpenAI, setTestingOpenAI] = useState(false);
   const [form, setForm] = useState<Record<string, string>>({});
 
   // Dynamic model lists
-  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
-  const [fetchingModels, setFetchingModels] = useState(false);
-  const [modelsError, setModelsError] = useState<string | null>(null);
   const [openaiModels, setOpenaiModels] = useState<string[]>([]);
   const [fetchingOpenAIModels, setFetchingOpenAIModels] = useState(false);
   const [openaiModelsError, setOpenaiModelsError] = useState<string | null>(null);
@@ -60,25 +56,12 @@ export default function SettingsPage() {
       const map: Record<string, string> = {};
       data.forEach((s) => { map[s.key] = s.value; });
       setForm(map);
-      if (map.ollama_base_url) fetchModels(map.ollama_base_url);
       if (map.openai_base_url) fetchOpenAIModels(map.openai_base_url, map.openai_api_key);
     } catch (e: any) {
       toast.error('Erreur : ' + e.message);
     } finally {
       setLoading(false);
     }
-  }
-
-  async function fetchModels(baseUrl: string) {
-    if (!baseUrl.trim()) { setOllamaModels([]); return; }
-    setFetchingModels(true);
-    setModelsError(null);
-    try {
-      const result = await api.fetchOllamaModels(baseUrl);
-      if (result.ok) setOllamaModels(result.models);
-      else { setOllamaModels([]); setModelsError(result.error || 'Erreur inconnue'); }
-    } catch (e: any) { setOllamaModels([]); setModelsError(e.message); }
-    finally { setFetchingModels(false); }
   }
 
   async function fetchOpenAIModels(baseUrl: string, apiKey?: string) {
@@ -108,21 +91,6 @@ export default function SettingsPage() {
     }
   }
 
-  async function handleTestOllama() {
-    setTesting(true);
-    setOllamaTest(null);
-    try {
-      await api.updateSettings({ ollama_base_url: form.ollama_base_url || '' });
-      const result = await api.testOllama();
-      setOllamaTest(result);
-      if (result.ok && result.models) setOllamaModels(result.models);
-    } catch (e: any) {
-      setOllamaTest({ ok: false, error: e.message });
-    } finally {
-      setTesting(false);
-    }
-  }
-
   async function handleTestOpenAI() {
     setTestingOpenAI(true);
     setOpenaiTest(null);
@@ -141,12 +109,11 @@ export default function SettingsPage() {
   const set = (key: string, value: string) =>
     setForm((f) => ({ ...f, [key]: value }));
 
-  // Group settings by category (hide deprecated ones)
+  // Group settings by category
   const hiddenKeys = new Set(['default_source_language']);
   const categories: Record<string, Setting[]> = {};
   for (const s of settings) {
     if (hiddenKeys.has(s.key)) continue;
-    // Put deprecated keys at the end within their category
     if (!categories[s.category]) categories[s.category] = [];
     categories[s.category].push(s);
   }
@@ -187,22 +154,6 @@ export default function SettingsPage() {
   // Keys that show the OpenAI model select (dropdown with fetched models)
   const openaiModelKeys = new Set(['openai_model', 'openai_refine_model']);
 
-  // Keys considered "deprecated" (prefixed with [Déprécié] or ollama_)
-  const isDeprecatedKey = (key: string) =>
-    key.startsWith('ollama_') || key === 'draft_think' || key === 'refine_think';
-
-  const handleUrlChange = useCallback(
-    (() => {
-      let timeout: ReturnType<typeof setTimeout>;
-      return (value: string) => {
-        set('ollama_base_url', value);
-        clearTimeout(timeout);
-        timeout = setTimeout(() => fetchModels(value), 800);
-      };
-    })(),
-    []
-  );
-
   const handleOpenAIUrlChange = useCallback(
     (() => {
       let timeout: ReturnType<typeof setTimeout>;
@@ -231,12 +182,7 @@ export default function SettingsPage() {
       openai_api_key: 'Clé API',
       openai_model: 'Modèle de draft',
       openai_refine_model: "Modèle d'affinage",
-      ollama_base_url: 'URL du serveur (Ollama)',
-      ollama_model: 'Modèle de draft (Ollama)',
-      ollama_refine_model: "Modèle d'affinage (Ollama)",
       llm_temperature: 'Température',
-      draft_think: 'Réflexion (draft)',
-      refine_think: 'Réflexion (affinage)',
       default_target_language: 'Langue cible',
       sliding_window_size: 'Fenêtre glissante',
       batch_size: 'Taille de batch',
@@ -287,9 +233,7 @@ export default function SettingsPage() {
           const Icon = config.icon;
           const isLlm = cat === 'llm';
 
-          // Separate deprecated items
-          const activeItems = items.filter(s => !isDeprecatedKey(s.key));
-          const deprecatedItems = items.filter(s => isDeprecatedKey(s.key));
+          const activeItems = items;
 
           return (
             <div key={cat} className={isLlm ? 'lg:col-span-2' : ''}>
@@ -327,24 +271,6 @@ export default function SettingsPage() {
                             models={openaiModels}
                             onChange={(v) => set(s.key, v)}
                           />
-                        ) : s.input_type === 'select' && s.options ? (
-                          <select
-                            value={form[s.key] || ''}
-                            onChange={(e) => set(s.key, e.target.value)}
-                            className="select-field"
-                          >
-                            {s.options.split(',').map((opt) => (
-                              <option key={opt} value={opt}>{opt.toUpperCase()}</option>
-                            ))}
-                          </select>
-                        ) : s.input_type === 'password' ? (
-                          <input
-                            type="password"
-                            value={form[s.key] || ''}
-                            onChange={(e) => set(s.key, e.target.value)}
-                            placeholder="••••••••"
-                            className="input-field"
-                          />
                         ) : s.key === 'openai_base_url' ? (
                           <div className="relative">
                             <input
@@ -370,6 +296,24 @@ export default function SettingsPage() {
                               className="input-field !pr-10"
                             />
                           </div>
+                        ) : s.input_type === 'select' && s.options ? (
+                          <select
+                            value={form[s.key] || ''}
+                            onChange={(e) => set(s.key, e.target.value)}
+                            className="select-field"
+                          >
+                            {s.options.split(',').map((opt) => (
+                              <option key={opt} value={opt}>{opt.toUpperCase()}</option>
+                            ))}
+                          </select>
+                        ) : s.input_type === 'password' ? (
+                          <input
+                            type="password"
+                            value={form[s.key] || ''}
+                            onChange={(e) => set(s.key, e.target.value)}
+                            placeholder="••••••••"
+                            className="input-field"
+                          />
                         ) : (
                           <input
                             type={s.input_type === 'number' ? 'number' : 'text'}
@@ -442,38 +386,8 @@ export default function SettingsPage() {
                     <p><span className="text-brand-400">OpenAI</span> → <code className="bg-white/[0.04] px-1 rounded text-gray-300">https://api.openai.com/v1</code> + clé API</p>
                     <p><span className="text-brand-400">OpenRouter</span> → <code className="bg-white/[0.04] px-1 rounded text-gray-300">https://openrouter.ai/api/v1</code> + clé API</p>
                     <p><span className="text-brand-400">Together AI</span> → <code className="bg-white/[0.04] px-1 rounded text-gray-300">https://api.together.xyz/v1</code> + clé API</p>
-                    <p><span className="text-brand-400">Ollama (local)</span> → <code className="bg-white/[0.04] px-1 rounded text-gray-300">http://localhost:11434/v1</code> (pas de clé)</p>
                   </div>
                 </div>
-              )}
-
-              {/* Deprecated settings (collapsed) */}
-              {deprecatedItems.length > 0 && (
-                <details className="mt-3 px-1">
-                  <summary className="text-xs text-gray-600 cursor-pointer hover:text-gray-400 select-none">
-                    ⚠️ Paramètres dépréciés ({deprecatedItems.length})
-                  </summary>
-                  <div className="mt-2 glass-card divide-y divide-white/[0.04] overflow-hidden opacity-60">
-                    {deprecatedItems.map((s) => (
-                      <div key={s.key} className="px-5 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-6">
-                        <div className="min-w-0 sm:w-1/3">
-                          <label className="text-xs font-semibold text-gray-400">{prettyLabel(s.key)}</label>
-                          {s.description && (
-                            <p className="text-[10px] text-gray-600 mt-0.5">{s.description}</p>
-                          )}
-                        </div>
-                        <div className="sm:w-2/3">
-                          <input
-                            type="text"
-                            value={form[s.key] || ''}
-                            onChange={(e) => set(s.key, e.target.value)}
-                            className="input-field !py-1.5 !text-xs"
-                          />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </details>
               )}
             </div>
           );

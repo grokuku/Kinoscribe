@@ -128,11 +128,6 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ updates }),
     }),
-  testOllama: () => request<{ ok: boolean; models?: string[]; error?: string }>('/settings/test-ollama', { method: 'POST' }),
-  fetchOllamaModels: (baseUrl: string) =>
-    request<{ ok: boolean; models: string[]; error?: string }>(
-      `/settings/ollama-models?base_url=${encodeURIComponent(baseUrl)}`
-    ),
   // OpenAI-compatible endpoints
   testOpenAI: () => request<{ ok: boolean; models?: string[]; error?: string }>('/settings/test-openai', { method: 'POST' }),
   fetchOpenAIModels: (baseUrl: string, apiKey?: string) =>

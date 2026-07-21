@@ -150,6 +150,14 @@
     border-radius: inherit;
   }
 
+  /* Poster fallback (when image fails to load) */
+  .poster-fallback {
+    @apply flex items-center justify-center bg-gradient-to-br from-gray-800/50 to-gray-900/80;
+  }
+  .poster-fallback .poster-fallback-icon {
+    @apply w-12 h-12 text-gray-700/50;
+  }
+
   /* Progress bar */
   .scan-progress-bar {
     @apply w-full h-2 bg-white/[0.06] rounded-full overflow-hidden;

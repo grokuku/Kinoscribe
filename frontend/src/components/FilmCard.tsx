@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { Film } from '../types';
 import { Link } from 'react-router-dom';
 import { Film as FilmIcon, Languages, Users, ArrowRight, FolderOpen } from 'lucide-react';
@@ -10,6 +11,7 @@ function posterUrl(film: Film): string | null {
 
 export default function FilmCard({ film }: { film: Film }) {
   const poster = posterUrl(film);
+  const [imgError, setImgError] = useState(false);
 
   return (
     <Link
@@ -17,18 +19,14 @@ export default function FilmCard({ film }: { film: Film }) {
       className="group relative glass-card-hover overflow-hidden flex flex-col animate-fade-in"
     >
       {/* Poster image or gradient placeholder */}
-      {poster ? (
+      {poster && !imgError ? (
         <div className="relative w-full aspect-[2/3] bg-gray-900 overflow-hidden">
           <img
             src={poster}
             alt={film.title}
             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
             loading="lazy"
-            onError={(e) => {
-              (e.target as HTMLImageElement).style.display = 'none';
-              const parent = (e.target as HTMLImageElement).parentElement;
-              if (parent) parent.classList.add('poster-fallback');
-            }}
+            onError={() => setImgError(true)}
           />
           <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
         </div>

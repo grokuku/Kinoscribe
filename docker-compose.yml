@@ -3,12 +3,17 @@
 # Usage:
 #   OLLAMA_URL=http://192.168.x.x:11434 docker compose up -d
 #   → http://localhost:3000
+#
+# Les images pré-buildées sont récupérées depuis GHCR.
+# Pour builder en local à la place, remplacez les sections `image:` par :
+#     build: ./backend   (pour le backend)
+#     build: ./frontend  (pour le frontend)
 # ───────────────────────────────────────────────────────────
 
 services:
   # ─── Backend (FastAPI) ──────────────────────────────────
   backend:
-    build: ./backend
+    image: ghcr.io/grokuku/kinoscribe-backend:latest
     container_name: kinoscribe-backend
     restart: unless-stopped
     ports:
@@ -45,7 +50,7 @@ services:
 
   # ─── Frontend (React + Nginx) ───────────────────────────
   frontend:
-    build: ./frontend
+    image: ghcr.io/grokuku/kinoscribe-frontend:latest
     container_name: kinoscribe-frontend
     restart: unless-stopped
     ports:

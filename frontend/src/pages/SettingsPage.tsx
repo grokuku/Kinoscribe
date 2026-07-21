@@ -270,6 +270,8 @@ export default function SettingsPage() {
                             value={form[s.key] || ''}
                             models={openaiModels}
                             onChange={(v) => set(s.key, v)}
+                            onRefresh={() => fetchOpenAIModels(form.openai_base_url, form.openai_api_key)}
+                            refreshing={fetchingOpenAIModels}
                           />
                         ) : s.key === 'openai_base_url' ? (
                           <div className="relative">
@@ -411,33 +413,48 @@ export default function SettingsPage() {
   );
 }
 
-// ── Model select with dropdown + manual input ──
+// ── Model select with dropdown + manual input + refresh button ──
 function ModelSelect({
   value,
   models,
   onChange,
+  onRefresh,
+  refreshing,
 }: {
   value: string;
   models: string[];
   onChange: (v: string) => void;
+  onRefresh: () => void;
+  refreshing: boolean;
 }) {
   return (
     <div className="space-y-2">
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="select-field"
-      >
-        <option value="" disabled>
-          {models.length > 0 ? '— Choisir un modèle —' : 'Aucun modèle trouvé'}
-        </option>
-        {models.map((model) => (
-          <option key={model} value={model}>{model}</option>
-        ))}
-        {value && !models.includes(value) && (
-          <option value={value}>{value} (non listé)</option>
-        )}
-      </select>
+      <div className="relative">
+        <select
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="select-field !pr-10"
+        >
+          <option value="" disabled>
+            {models.length > 0 ? '— Choisir un modèle —' : 'Aucun modèle trouvé'}
+          </option>
+          {models.map((model) => (
+            <option key={model} value={model}>{model}</option>
+          ))}
+          {value && !models.includes(value) && (
+            <option value={value}>{value} (non listé)</option>
+          )}
+        </select>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={refreshing}
+          title="Rafraîchir la liste des modèles"
+          className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md text-gray-500 hover:text-gray-300 hover:bg-white/[0.06] transition-colors disabled:opacity-50"
+        >
+          <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+        </button>
+      </div>
       <input
         type="text"
         value={value}

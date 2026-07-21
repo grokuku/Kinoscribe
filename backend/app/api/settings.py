@@ -40,30 +40,6 @@ async def update_settings(
         raise HTTPException(422, str(e))
 
 
-@router.post("/test-ollama")
-async def test_ollama():
-    """Test connectivity to the configured Ollama server (legacy)."""
-    result = await settings_service.test_ollama_connection()
-    if result["ok"]:
-        logger.info("Ollama connection OK", models=result.get("models", []))
-    else:
-        logger.warning("Ollama connection failed", error=result.get("error"))
-    return result
-
-
-@router.get("/ollama-models")
-async def list_ollama_models(
-    base_url: str = Query(..., description="Ollama server URL to query"),
-):
-    """Fetch the list of available models from a specific Ollama server URL."""
-    result = await settings_service.test_ollama_connection(base_url)
-    if result["ok"]:
-        return {"ok": True, "models": result.get("models", [])}
-    return {"ok": False, "models": [], "error": result.get("error", "")}
-
-
-# ─── New OpenAI-compatible endpoints ──────────────────────────────────────
-
 
 @router.post("/test-openai")
 async def test_openai():

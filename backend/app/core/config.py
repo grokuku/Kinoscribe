@@ -25,11 +25,6 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
 
-    # ─── Legacy Ollama (kept for backward compat) ───────
-    ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "llama3"
-    ollama_refine_model: str = "llama3"
-
     # ─── Translation defaults ──────────────────────────
     default_source_language: str = "en"
     default_target_language: str = "fr"

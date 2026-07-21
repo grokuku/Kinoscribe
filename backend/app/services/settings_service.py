@@ -26,7 +26,7 @@ DEFAULTS: List[dict] = [
         "default": "openai",
         "description": "Fournisseur LLM (openai, openrouter, together, custom)",
         "input_type": "select",
-        "options": "openai,openrouter,together,custom,ollama",
+        "options": "openai,openrouter,together,custom",
         "category": "llm",
     },
     {
@@ -57,28 +57,7 @@ DEFAULTS: List[dict] = [
         "input_type": "text",
         "category": "llm",
     },
-    # ── Legacy Ollama settings (conservés pour compatibilité) ──
-    {
-        "key": "ollama_base_url",
-        "default": env_settings.ollama_base_url,
-        "description": "[Déprécié] URL du serveur Ollama — utilisez openai_base_url à la place",
-        "input_type": "url",
-        "category": "llm",
-    },
-    {
-        "key": "ollama_model",
-        "default": env_settings.ollama_model,
-        "description": "[Déprécié] Ancien modèle Ollama — utilisez openai_model",
-        "input_type": "text",
-        "category": "llm",
-    },
-    {
-        "key": "ollama_refine_model",
-        "default": env_settings.ollama_refine_model,
-        "description": "[Déprécié] Ancien modèle d'affinage Ollama",
-        "input_type": "text",
-        "category": "llm",
-    },
+
     {
         "key": "llm_temperature",
         "default": "0.3",
@@ -86,22 +65,7 @@ DEFAULTS: List[dict] = [
         "input_type": "number",
         "category": "llm",
     },
-    {
-        "key": "draft_think",
-        "default": "false",
-        "description": "[Déprécié] Ancien mode réflexion draft — ignoré avec les API OpenAI",
-        "input_type": "select",
-        "options": "true,false",
-        "category": "llm",
-    },
-    {
-        "key": "refine_think",
-        "default": "true",
-        "description": "[Déprécié] Ancien mode réflexion affinage — ignoré avec les API OpenAI",
-        "input_type": "select",
-        "options": "true,false",
-        "category": "llm",
-    },
+
     # ── Traduction ────────────────────────────────
     {
         "key": "default_target_language",
@@ -195,12 +159,52 @@ DEFAULTS: List[dict] = [
 class SettingsService:
     """Read / write application settings from the database."""
 
+    # ─── Deprecated keys to remove on startup ─────────────
+    _DEPRECATED_KEYS = [
+        "ollama_base_url",
+        "ollama_model",
+        "ollama_refine_model",
+        "draft_think",
+        "refine_think",
+    ]
+
     async def seed_if_empty(self, session: AsyncSession) -> None:
-        """Populate settings table on first boot (idempotent)."""
+        """Populate settings table on first boot (idempotent). Also cleans up deprecated keys
+        and adds any missing default settings (for schema migrations)."""
         result = await session.execute(select(Setting))
         existing = result.scalars().first()
+
+        # Clean up deprecated keys from DB (runs every time, not just first boot)
+        cleaned = False
+        for dk in self._DEPRECATED_KEYS:
+            row = await session.get(Setting, dk)
+            if row:
+                await session.delete(row)
+                logger.info("Removed deprecated setting", key=dk)
+                cleaned = True
+
         if existing:
-            return  # Already seeded
+            # ── Add missing default settings (for schema migrations) ──
+            added = False
+            existing_keys = {
+                row.key for row in (await session.execute(select(Setting.key))).scalars().all()
+            }
+            for d in DEFAULTS:
+                if d["key"] not in existing_keys:
+                    s = Setting(
+                        key=d["key"],
+                        value=d["default"],
+                        description=d.get("description", ""),
+                        input_type=d.get("input_type", "text"),
+                        options=d.get("options"),
+                        category=d.get("category", "general"),
+                    )
+                    session.add(s)
+                    logger.info("Added missing setting", key=d["key"])
+                    added = True
+            if cleaned or added:
+                await session.commit()
+            return
 
         for d in DEFAULTS:
             s = Setting(
@@ -248,7 +252,6 @@ class SettingsService:
         "sliding_window_size": {"type": "int", "min": 0, "max": 200},
         "batch_size": {"type": "int", "min": 1, "max": 100},
         "llm_temperature": {"type": "float", "min": 0.0, "max": 2.0},
-        "ollama_base_url": {"type": "url"},
         "openai_base_url": {"type": "url"},
     }
 
@@ -303,22 +306,6 @@ class SettingsService:
             raise ValueError("; ".join(errors))
         await session.commit()
         return await self.get_all(session)
-
-    async def test_ollama_connection(self, base_url: Optional[str] = None) -> dict:
-        """Test connectivity to the Ollama server (legacy)."""
-        import aiohttp
-
-        url = (base_url or await self.get_async("ollama_base_url")).rstrip("/")
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{url}/api/tags", timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        models = [m.get("name", "") for m in data.get("models", [])]
-                        return {"ok": True, "models": models}
-                    return {"ok": False, "error": f"HTTP {resp.status}"}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
 
     async def test_openai_connection(self, base_url: Optional[str] = None, api_key: Optional[str] = None) -> dict:
         """Test connectivity to an OpenAI-compatible API by listing models."""

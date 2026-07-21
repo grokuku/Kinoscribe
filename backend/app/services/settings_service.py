@@ -186,9 +186,9 @@ class SettingsService:
         if existing:
             # ── Add missing default settings (for schema migrations) ──
             added = False
-            existing_keys = {
-                row.key for row in (await session.execute(select(Setting.key))).scalars().all()
-            }
+            existing_keys = set(
+                (await session.execute(select(Setting.key))).scalars().all()
+            )
             for d in DEFAULTS:
                 if d["key"] not in existing_keys:
                     s = Setting(

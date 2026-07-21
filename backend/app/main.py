@@ -2,6 +2,7 @@
 Kinoscribe — FastAPI application entry point.
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -108,7 +109,6 @@ async def lifespan(app: FastAPI):
             logger.warning("Auto-mount failed at startup", error=str(e))
 
     # Start auto-scan scheduler
-    import asyncio
     scheduler_task = asyncio.create_task(_auto_scan_scheduler())
 
     yield

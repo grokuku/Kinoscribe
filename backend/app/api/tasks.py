@@ -538,8 +538,6 @@ async def _run_translation_workflow(task_id: str):
         batch_size = await settings_service.get_int(session, "batch_size")
         temperature = await settings_service.get_float(session, "llm_temperature")
         auto_clean_sdh = await settings_service.get_bool(session, "auto_clean_sdh")
-        draft_think = await settings_service.get_bool(session, "draft_think")
-        refine_think = await settings_service.get_bool(session, "refine_think")
 
         # Use refine model if configured, otherwise same as draft model
         refine_model = refine_model_raw.strip() if refine_model_raw and refine_model_raw.strip() else None
@@ -680,7 +678,7 @@ async def _run_translation_workflow(task_id: str):
                 window_size=window_size,
                 batch_size=batch_size,
                 temperature=temperature,
-                think=draft_think,
+                think=False,
                 db_session=session,
                 ref_tracks=ref_tracks,
             )
@@ -693,7 +691,7 @@ async def _run_translation_workflow(task_id: str):
                     "Starting refine pass",
                     task_id=task_id,
                     model=refine_model,
-                    think=refine_think,
+                    think=False,
                 )
                 refine_llm = OpenAIProvider(base_url=base_url, api_key=api_key, model=refine_model)
                 refine_ctx = ContextService(refine_llm)
@@ -702,7 +700,7 @@ async def _run_translation_workflow(task_id: str):
                     task, film, translated_lines, parsed,
                     batch_size=batch_size,
                     temperature=temperature,
-                    think=refine_think,
+                    think=False,
                     db_session=session,
                 )
 
@@ -758,8 +756,6 @@ async def _run_improve_workflow(task_id: str):
         window_size = await settings_service.get_int(session, "sliding_window_size")
         batch_size = await settings_service.get_int(session, "batch_size")
         temperature = await settings_service.get_float(session, "llm_temperature")
-        draft_think = await settings_service.get_bool(session, "draft_think")
-        refine_think = await settings_service.get_bool(session, "refine_think")
 
         # Use refine model for improvement pass
         refine_model = refine_model_raw.strip() if refine_model_raw and refine_model_raw.strip() else model
@@ -872,7 +868,7 @@ async def _run_improve_workflow(task_id: str):
                 window_size=window_size,
                 batch_size=batch_size,
                 temperature=temperature,
-                think=refine_think,
+                think=False,
                 db_session=session,
                 ref_tracks=ref_tracks,
             )
@@ -932,8 +928,6 @@ async def _run_pipeline_workflow(task_id: str, steps: dict = None):
         batch_size = await settings_service.get_int(session, "batch_size")
         temperature = await settings_service.get_float(session, "llm_temperature")
         auto_clean_sdh = await settings_service.get_bool(session, "auto_clean_sdh")
-        draft_think = await settings_service.get_bool(session, "draft_think")
-        refine_think = await settings_service.get_bool(session, "refine_think")
         refine_model = (refine_model_raw or "").strip() or None
 
         llm, ctx, tx, sub_svc = _build_services_from_settings(base_url, api_key, model, cps_limit)
@@ -1116,7 +1110,7 @@ async def _run_pipeline_workflow(task_id: str, steps: dict = None):
                 translated_lines = await tx.translate_film_subtitles(
                     task, film, parsed,
                     window_size=window_size, batch_size=batch_size,
-                    temperature=temperature, think=draft_think,
+                    temperature=temperature, think=False,
                     db_session=session, ref_tracks=ref_tracks,
                 )
 
@@ -1133,7 +1127,7 @@ async def _run_pipeline_workflow(task_id: str, steps: dict = None):
                     translated_lines = await refine_tx.refine_translation(
                         task, film, translated_lines, parsed,
                         batch_size=batch_size, temperature=temperature,
-                        think=refine_think, db_session=session,
+                        think=False, db_session=session,
                     )
 
                 task.progress_pct = 80

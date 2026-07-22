@@ -4,7 +4,7 @@ Film-related API routes: CRUD + metadata.
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Body
 from fastapi.responses import Response
 import asyncio
 from sqlalchemy import select
@@ -460,7 +460,7 @@ async def _ensure_local_video(film: Film, session) -> str:
                 # Try translating remote path to mount path
                 remote_path = (source.ssh_remote_path or source.path or "").rstrip("/")
                 mount_path = os.path.normpath(mount_mp)
-                if film.video_path and film.video_path.startswith(remote_path):
+                if remote_path and film.video_path and film.video_path.startswith(remote_path):
                     local_path = film.video_path.replace(remote_path, mount_path.rstrip('/'), 1)
                     if os.path.isfile(local_path):
                         return local_path
@@ -471,7 +471,7 @@ async def _ensure_local_video(film: Film, session) -> str:
                     return normalized_video
 
     # Must be SSH without mount — download to work dir
-    if not film.video_path or not film.library_id:
+    if not film.video_path:
         raise HTTPException(400, "No video file available for this film.")
 
     from app.models.database import LibrarySource
@@ -486,7 +486,7 @@ async def _ensure_local_video(film: Film, session) -> str:
 
     for source in sources:
         remote_path = (source.ssh_remote_path or source.path or "").rstrip("/")
-        if source.source_type == "ssh" and film.video_path.startswith(remote_path):
+        if source.source_type == "ssh" and remote_path and film.video_path.startswith(remote_path):
             fs = SSHFilesystem(
                 host=source.ssh_host,
                 port=source.ssh_port or 22,
@@ -546,7 +546,7 @@ async def _list_film_subtitles_raw(film_id: str, session) -> list[dict]:
                     mp = getattr(source, 'mount_point', None)
                     if mp and mp.strip():
                         remote_path = (source.ssh_remote_path or source.path or "").rstrip("/")
-                        if film.path.rstrip("/").startswith(remote_path):
+                        if remote_path and film.path.rstrip("/").startswith(remote_path):
                             mount_path = film.path.rstrip("/").replace(remote_path, mp.rstrip("/"), 1)
                             break
 
@@ -574,7 +574,7 @@ async def _list_film_subtitles_raw(film_id: str, session) -> list[dict]:
                         # sources already queried above
                         for source in sources:
                             remote_path = (source.ssh_remote_path or source.path or "").rstrip("/")
-                            if source.source_type == "ssh" and film.path.rstrip("/").startswith(remote_path):
+                            if source.source_type == "ssh" and remote_path and film.path.rstrip("/").startswith(remote_path):
                                 fs = SSHFilesystem(
                                     host=source.ssh_host,
                                     port=source.ssh_port or 22,
@@ -1096,7 +1096,7 @@ async def clean_work_files(
 @router.post("/{film_id}/translations/content")
 async def read_translation_content(
     film_id: str,
-    body: dict,
+    body: dict = Body(...),
     session: AsyncSession = Depends(get_session),
 ):
     """
@@ -1116,7 +1116,7 @@ async def read_translation_content(
     try:
         parsed = svc.parse_file(file_path)
     except Exception as e:
-        raise HTTPException(500, f"Failed to read subtitle file: {str(e)[:200]}")
+        raise HTTPException(400, f"Failed to read subtitle file: {str(e)[:200]}")
 
     lines = []
     raw_text_parts = []
@@ -1124,8 +1124,8 @@ async def read_translation_content(
         if not line.is_empty:
             lines.append({
                 "index": line.index,
-                "start": line.start,
-                "end": line.end,
+                "start": line.start_ms,
+                "end": line.end_ms,
                 "text": line.text,
             })
             raw_text_parts.append(line.text)
@@ -1185,7 +1185,7 @@ async def list_translations(
 @router.post("/{film_id}/translations/install")
 async def install_translation(
     film_id: str,
-    body: dict,
+    body: dict = Body(...),
     session: AsyncSession = Depends(get_session),
 ):
     """

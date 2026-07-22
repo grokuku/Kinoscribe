@@ -60,7 +60,7 @@ async def _get_filesystem_for_film(
             if normalized_film_path.startswith(mount_path) and os.path.isdir(normalized_film_path):
                 return None, normalized_film_path
             # Translate remote path to mount path (film scanned before mount was available)
-            if film.path and film.path.rstrip("/").startswith(source_path):
+            if source_path and film.path and film.path.rstrip("/").startswith(source_path):
                 local_path = film.path.rstrip("/").replace(source_path, mount_path.rstrip("/"), 1)
                 if os.path.isdir(local_path):
                     return None, local_path
@@ -160,7 +160,7 @@ async def install_subtitle_to_source(
                         film_dir = normalized_film_path
                         break
                     # Translate remote path to mount path
-                    if film.path and film.path.rstrip("/").startswith(remote_path):
+                    if remote_path and film.path and film.path.rstrip("/").startswith(remote_path):
                         film_dir = film.path.rstrip("/").replace(remote_path, mount_path.rstrip("/"), 1)
                         break
 
@@ -208,7 +208,7 @@ async def find_film_source_dir(
                 if normalized.startswith(mount_path) and os.path.isdir(normalized):
                     return normalized, None
                 # Translate remote path to mount path
-                if film.path.rstrip("/").startswith(remote_path):
+                if remote_path and film.path.rstrip("/").startswith(remote_path):
                     local_path = film.path.rstrip("/").replace(remote_path, mount_path.rstrip("/"), 1)
                     if os.path.isdir(local_path):
                         return local_path, None

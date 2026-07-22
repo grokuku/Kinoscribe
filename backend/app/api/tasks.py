@@ -392,6 +392,9 @@ async def get_task_content(
 
     If target_path exists, reads the SRT file and returns its content.
     Bonus: parses the SRT and returns structured JSON with index, start, end, text.
+
+    If the subtitle file cannot be parsed (e.g. partial/empty draft during translation),
+    falls back to returning the raw text content without structured line data.
     """
     task = await session.get(TranslationTask, task_id)
     if not task:
@@ -403,7 +406,7 @@ async def get_task_content(
     # - If completed, read target_path
     # - If still running/has draft, read draft_path
     # - Fallback: target_path if it exists
-    content_path = None
+    content_path: Optional[str] = None
     if is_completed and task.target_path and os.path.exists(task.target_path):
         content_path = task.target_path
     elif task.draft_path and os.path.exists(task.draft_path):
@@ -413,7 +416,7 @@ async def get_task_content(
 
     if not content_path:
         # If task is pending/failed with no output, return empty
-        if task.status in ("pending", "failed") or not is_completed:
+        if not is_completed:
             return {
                 "task_id": task_id,
                 "filename": task.source_filename,
@@ -425,24 +428,56 @@ async def get_task_content(
             }
         raise HTTPException(404, "Output file not found — task may not be completed yet")
 
-    # Read / parse the subtitle file
+    # Read raw text from file first (fallback if parsing fails)
+    raw_text = ""
     try:
-        from app.services.subtitle_service import SubtitleService
-        svc = SubtitleService()
+        with open(content_path, "r", encoding="utf-8", errors="replace") as f:
+            raw_text = f.read()
+    except Exception as e:
+        logger.warning(
+            "Could not read raw subtitle file",
+            task_id=task_id,
+            path=content_path,
+            error=str(e),
+        )
+
+    # Try to parse the subtitle file into structured lines
+    from app.services.subtitle_service import SubtitleService
+    svc = SubtitleService()
+
+    try:
         parsed = svc.parse_file(content_path)
     except Exception as e:
-        logger.error("Failed to parse subtitle file", task_id=task_id, path=content_path, error=str(e))
-        raise HTTPException(500, f"Failed to read subtitle file: {str(e)[:200]}")
+        # Parsing failed (e.g. empty/truncated draft file during translation).
+        # Return raw text content gracefully instead of a 500.
+        logger.warning(
+            "Failed to parse subtitle file, returning raw text",
+            task_id=task_id,
+            path=content_path,
+            error=str(e),
+        )
+        display_filename = task.target_filename or os.path.basename(content_path)
+        return {
+            "task_id": task_id,
+            "filename": display_filename,
+            "raw_text": raw_text,
+            "lines": [],
+            "line_count": 0,
+            "total_lines": task.total_lines or 0,
+            "translated_lines": task.translated_lines or 0,
+            "draft": not is_completed,
+            "parse_error": str(e)[:200],
+        }
 
-    # Build structured response
+    # Build structured response from parsed lines
     lines = []
     raw_text_parts = []
     for line in parsed.lines:
         if not line.is_empty:
             lines.append({
                 "index": line.index,
-                "start": line.start,
-                "end": line.end,
+                "start": line.start_ms,
+                "end": line.end_ms,
                 "text": line.text,
             })
             raw_text_parts.append(line.text)
@@ -453,6 +488,10 @@ async def get_task_content(
                 "end": "",
                 "text": "",
             })
+
+    # Use raw text from file if parsing produced fewer parts (empty lines were skipped)
+    if not raw_text_parts and raw_text:
+        raw_text_parts = [raw_text]
 
     display_filename = task.target_filename or os.path.basename(content_path)
 

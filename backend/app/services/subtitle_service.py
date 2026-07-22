@@ -183,6 +183,9 @@ class SubtitleService:
     ) -> str:
         r"""
         Write lines back to an SRT file, preserving timing.
+        Uses an atomic write (temp file + rename) so that concurrent readers
+        never see a partially-written file.
+
         pysubs2 uses \N internally for line breaks within an event,
         so we must NOT double-encode. When we parse, pysubs2 converts
         \N to \n in our text. When we write back, we just pass the
@@ -208,7 +211,21 @@ class SubtitleService:
 
         # Ensure output directory exists
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        subs.save(output_path, format_="srt")
+
+        # Atomic write: write to a temp file in the same directory, then rename
+        tmp_path = output_path + ".tmp." + os.urandom(4).hex()
+        try:
+            subs.save(tmp_path, format_="srt")
+            os.replace(tmp_path, output_path)
+        except Exception:
+            # Clean up temp file on failure
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
         logger.info("Wrote SRT file", path=output_path, lines=len(lines))
         return output_path
 
